@@ -47,12 +47,13 @@ $fp = ($nabRows | Measure-Object FalsePositives -Sum).Sum; $pts = ($nabRows | Me
 
 # UCR: the archive as published in 2021.
 $ucr = Join-Path $Cache 'ucr'
-$zip = Join-Path $ucr 'UCR_TimeSeriesAnomalyDatasets2021.zip'
-if (-not (Test-Path $zip)) {
+if (-not (Test-Path $ucr) -or -not (Get-ChildItem $ucr -Recurse -Filter '001_UCR_Anomaly_*.txt')) {
     [void][IO.Directory]::CreateDirectory($ucr)
+    $zip = Join-Path $ucr 'UCR_TimeSeriesAnomalyDatasets2021.zip'
     Invoke-WebRequest -UseBasicParsing 'https://www.cs.ucr.edu/~eamonn/time_series_data_2018/UCR_TimeSeriesAnomalyDatasets2021.zip' -OutFile $zip
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $ucr)
+    Remove-Item $zip   # 184 MB; the extracted files are what is used
 }
 $files = Get-ChildItem $ucr -Recurse -Filter '*_UCR_Anomaly_*.txt' | Where-Object { $_.DirectoryName -like '*UCR_Anomaly_FullData*' }
 $ucrRows = foreach ($file in $files) { [Hoodata.Eval.Benchmarks]::Ucr($file.FullName, $cfg) }
