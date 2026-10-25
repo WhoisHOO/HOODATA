@@ -1,0 +1,6 @@
+# Collected data, settings and the database, kept next to start.bat
+/data/
+
+# Editors
+.vscode/
+.idea/

@@ -1,0 +1,14 @@
+* text=auto
+
+# Windows scripts keep CRLF in every checkout, including GitHub's "Download ZIP".
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+*.psm1 text eol=crlf
+*.xaml text eol=crlf
+*.cs   text eol=crlf
+# Opened in Notepad.
+app/restricted.txt text eol=crlf
+
+*.png binary
+*.jpg binary
+*.xlsx binary
