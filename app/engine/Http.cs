@@ -213,6 +213,8 @@ namespace Hoodata
                         res = HttpResponse.Error(500, "internal");
                     }
 
+                    if (req.BodyRead < req.ContentLength && req.ContentLength - req.BodyRead <= 1024 * 1024)
+                        try { req.CopyBodyTo(Stream.Null, null); } catch (IOException) { return; }
                     // An unread body makes the connection unusable for the next request.
                     bool keep = req.Version == "HTTP/1.1" && !"close".Equals(req.Header("Connection"), StringComparison.OrdinalIgnoreCase)
                         && req.BodyRead == req.ContentLength;

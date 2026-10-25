@@ -780,6 +780,8 @@
       this.jobsBox = h('div');
       root.appendChild(this.jobsBox);
       root.appendChild(h('h2', { text: T('AddSource') }));
+      this.formBox = h('div');
+      root.appendChild(this.formBox);
       this.importBox = h('div');
       root.appendChild(this.importBox);
       this.addGrid = h('div', { class: 'add-grid' });
@@ -800,11 +802,168 @@
             await api('/api/sources', { method: 'POST', body: { kind: 'pc', name: T('PcSource'), config: { interval: 5 } } });
             await poll(); this.build();
           } })));
-      for (const k of ['http', 'mqtt', 'modbus', 'serial', 'xlsx', 'folder'])
+      for (const k of ['http', 'mqtt', 'modbus', 'serial', 'folder'])
         this.addGrid.appendChild(h('div', { class: 'card add-card' }, h('span', { class: 'title', text: T('Kind_src_' + k) }),
-          h('span', { class: 'muted small', text: T('AddHelp_' + k) }), h('span', { class: 'status idle', text: T('ComingSoon') })));
+          h('span', { class: 'muted small', text: T('AddHelp_' + k) }),
+          h('button', { class: 'btn', type: 'button', text: T('Add'), onclick: () => this.openForm(k, null) })));
       this.lastSig = this.sig();
       this.buildJobs();
+    },
+    // One form for adding or changing a source; the fields depend on the kind.
+    async openForm(kind, src) {
+      const cfg = src ? src.config : {};
+      const box = this.formBox;
+      box.textContent = '';
+      const fields = {};
+      const val = (k, d) => (cfg[k] !== undefined && cfg[k] !== null ? cfg[k] : d);
+      const text = (k, d, type) => (fields[k] = h('input', { type: type || 'text', value: val(k, d) }));
+      const num = (k, d, step) => (fields[k] = h('input', { type: 'number', step: step || 'any', value: val(k, d), size: 8 }));
+      const check = k => { const c = h('input', { type: 'checkbox' }); c.checked = !!val(k, false); fields[k] = c; return c; };
+      const select = (k, d, options) => (fields[k] = h('select', {}, options.map(([v, label]) => h('option', { value: v, text: label, selected: String(val(k, d)) === String(v) }))));
+      const field = (k, control, wide) => h('label', { class: 'field' + (wide ? ' wide' : '') }, T('F_' + k), control);
+      const name = h('input', { type: 'text', value: src ? src.name : T('Kind_src_' + kind), maxlength: 120 });
+      const rows = [h('label', { class: 'field' }, T('SourceName'), name)];
+      let registers = null, rtuOnly = [];
+
+      if (kind === 'http') {
+        rows.push(field('port', num('port', 47110, 1)), h('label', { class: 'check' }, check('lan'), T('F_lan')));
+      } else if (kind === 'mqtt') {
+        rows.push(field('host', text('host', '')), field('port', num('port', 1883, 1)), h('label', { class: 'check' }, check('tls'), T('F_tls')),
+          field('user', text('user', '')),
+          field('password', fields.password = h('input', { type: 'password', autocomplete: 'new-password', placeholder: cfg.has_password ? T('PasswordKept') : '' })),
+          field('topics', text('topics', '#'), true), field('qos', select('qos', 0, [[0, '0'], [1, '1']])),
+          h('label', { class: 'check' }, check('retained'), T('F_retained')));
+      } else if (kind === 'modbus') {
+        rows.push(field('host', text('host', '')), field('port', num('port', 502, 1)), field('unit', num('unit', 1, 1)), field('interval', num('interval', 5)));
+        registers = this.registerEditor(cfg.registers || []);
+      } else if (kind === 'serial') {
+        let ports = [];
+        try { ports = await api('/api/serial-ports'); } catch (e) { }
+        const current = val('port', '');
+        if (current && !ports.includes(current)) ports.unshift(current);
+        rows.push(field('port', ports.length ? select('port', current || ports[0], ports.map(p => [p, p])) : h('span', { class: 'notice', text: T('NoSerialPorts') })),
+          field('baud', select('baud', 9600, [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200].map(b => [b, String(b)]))),
+          field('mode', select('mode', 'text', [['text', T('Opt_text')], ['rtu', T('Opt_rtu')]])));
+        const rtu = [field('parity', select('parity', 'none', [['none', T('Opt_none')], ['even', T('Opt_even')], ['odd', T('Opt_odd')]])),
+          field('unit', num('unit', 1, 1)), field('interval', num('interval', 5))];
+        rows.push(...rtu);
+        registers = this.registerEditor(cfg.registers || []);
+        rtuOnly = rtu.concat([registers.el]);
+        const sync = () => rtuOnly.forEach(el => el.classList.toggle('hidden', fields.mode.value !== 'rtu'));
+        fields.mode.addEventListener('change', sync);
+        setTimeout(sync, 0);
+      } else if (kind === 'folder') {
+        rows.push(field('path', text('path', ''), true), field('pattern', text('pattern', '*.csv')));
+      }
+
+      const msg = h('p', { class: 'notice error hidden', role: 'alert' });
+      const save = async () => {
+        const config = {};
+        for (const [k, el] of Object.entries(fields)) {
+          if (el.type === 'checkbox') config[k] = el.checked;
+          else if (el.type === 'number' || ['qos', 'baud'].includes(k)) config[k] = Number(el.value);
+          else config[k] = el.value.trim();
+        }
+        if (kind === 'mqtt' && !config.password) delete config.password;
+        if (registers) config.registers = registers.value();
+        try {
+          if (src) await api('/api/sources/' + src.id, { method: 'POST', body: { name: name.value, config } });
+          else await api('/api/sources', { method: 'POST', body: { kind, name: name.value, config } });
+          box.textContent = '';
+          await poll();
+          this.build();
+        } catch (e) {
+          msg.textContent = T('Err_' + e.message) !== 'Err_' + e.message ? T('Err_' + e.message) : e.message;
+          msg.classList.remove('hidden');
+        }
+      };
+      box.appendChild(h('div', { class: 'card' },
+        h('h2', { text: (src ? T('EditSource') : T('AddSource')) + ' · ' + T('Kind_src_' + kind) }),
+        h('p', { class: 'muted small', text: T('Help_' + kind) }),
+        h('div', { class: 'form-row' }, rows), registers ? registers.el : null, msg,
+        h('div', { class: 'toolbar' }, h('button', { class: 'btn primary', type: 'button', text: T('Save'), onclick: save }),
+          h('button', { class: 'btn', type: 'button', text: T('Cancel'), onclick: () => { box.textContent = ''; } }))));
+      box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+    // A table of Modbus registers: what each value is called, where it is and how it is stored.
+    registerEditor(list) {
+      const body = h('tbody');
+      const AREAS = ['holding', 'input', 'coil', 'discrete'], TYPES = ['int16', 'uint16', 'int32', 'uint32', 'float32'];
+      const addRow = r => {
+        r = r || {};
+        const sel = (opts, v, labels) => h('select', {}, opts.map(o => h('option', { value: o, text: labels ? T(labels + o) : o, selected: o === v })));
+        const cells = {
+          name: h('input', { type: 'text', value: r.name || '', size: 10 }),
+          fn: sel(AREAS, r.fn || 'holding', 'Opt_'),
+          address: h('input', { type: 'number', min: 0, max: 65535, step: 1, value: r.address !== undefined ? r.address : 0, size: 6 }),
+          type: sel(TYPES, r.type || 'uint16'),
+          order: sel(['big', 'little'], r.order || 'big', 'Opt_'),
+          scale: h('input', { type: 'number', step: 'any', value: r.scale !== undefined ? r.scale : 1, size: 6 }),
+          unit: h('input', { type: 'text', value: r.unit || '', size: 5 })
+        };
+        const tr = h('tr', {}, Object.values(cells).map(c => h('td', {}, c)),
+          h('td', {}, h('button', { class: 'btn danger', type: 'button', text: T('Remove'), onclick: () => tr.remove() })));
+        tr.cells_ = cells;
+        body.appendChild(tr);
+      };
+      for (const r of list) addRow(r);
+      if (!list.length) addRow({ name: 'value1' });
+      const head = h('tr', {}, ['F_reg_name', 'F_reg_fn', 'F_reg_address', 'F_reg_type', 'F_reg_order', 'F_reg_scale', 'F_reg_unit'].map(k => h('th', { text: T(k) })), h('th'));
+      const el = h('div', {}, h('h2', { text: T('F_registers') }), h('p', { class: 'muted small', text: T('RegistersHelp') }),
+        h('div', { class: 'table-wrap' }, h('table', {}, h('thead', {}, head), body)),
+        h('div', { class: 'toolbar' }, h('button', { class: 'btn', type: 'button', text: T('AddRegister'), onclick: () => addRow({}) })));
+      return {
+        el,
+        value: () => [...body.children].map(tr => {
+          const c = tr.cells_;
+          return { name: c.name.value.trim(), fn: c.fn.value, address: Number(c.address.value), type: c.type.value, order: c.order.value, scale: Number(c.scale.value), unit: c.unit.value.trim() };
+        }).filter(r => r.name)
+      };
+    },
+    // How a device sends to an HTTP source: addresses, the key, and examples to copy.
+    httpHelp(s) {
+      const port = s.config.port || 47110, key = s.config.key || '';
+      const box = h('div', { class: 'http-help' });
+      const fill = addresses => {
+        box.textContent = '';
+        const hosts = s.config.lan ? addresses : ['127.0.0.1'];
+        const url = 'http://' + (hosts[0] || '127.0.0.1') + ':' + port + '/ingest/room1';
+        box.appendChild(h('p', { class: 'small', text: T('HttpSendTo') }));
+        box.appendChild(h('ul', { class: 'small' }, hosts.map(a => h('li', {}, h('code', { text: 'http://' + a + ':' + port + '/ingest' })))));
+        const keyLine = h('p', { class: 'small' }, T('HttpKey') + ' ', h('code', { text: key }), ' ',
+          h('button', { class: 'btn', type: 'button', text: T('Copy'), onclick: () => { try { navigator.clipboard.writeText(key); } catch (e) { } } }),
+          ' ', h('button', { class: 'btn', type: 'button', text: T('NewKey'), onclick: async () => {
+            if (!confirm(T('ConfirmNewKey'))) return;
+            await api('/api/sources/' + s.id, { method: 'POST', body: { config: { new_key: true } } });
+            await poll(); this.build();
+          } }));
+        box.appendChild(keyLine);
+        if (!s.config.lan) box.appendChild(h('p', { class: 'muted small', text: T('HttpLocalOnly') }));
+        box.appendChild(h('p', { class: 'small', text: T('HttpExample') }));
+        box.appendChild(h('pre', { text: 'curl -X POST "' + url + '" -H "X-HOODATA-Key: ' + key + '" -d "temp=23.5,hum=61"' }));
+        box.appendChild(h('p', { class: 'small', text: T('HttpEsp32') }));
+        box.appendChild(h('pre', { text: [
+          '#include <HTTPClient.h>',
+          'HTTPClient http;',
+          'http.begin("' + url + '");',
+          'http.addHeader("X-HOODATA-Key", "' + key + '");',
+          'http.POST("temp=" + String(temp) + ",hum=" + String(hum));',
+          'http.end();'].join('\n') }));
+      };
+      fill([]);
+      api('/api/network').then(n => fill(n.addresses)).catch(() => { });
+      return h('details', {}, h('summary', { text: T('HttpHowTo') }), box);
+    },
+    summary(s) {
+      const c = s.config || {};
+      switch (s.kind) {
+        case 'http': return F('SumHttp', c.port, T(c.lan ? 'SumLan' : 'SumLocal'));
+        case 'mqtt': return F('SumMqtt', (c.tls ? 'mqtts://' : 'mqtt://') + c.host + ':' + c.port, c.topics);
+        case 'modbus': return F('SumModbus', c.host + ':' + c.port, (c.registers || []).length);
+        case 'serial': return F('SumSerial', c.port, c.baud, T('Opt_' + (c.mode || 'text')));
+        case 'folder': return F('SumFolder', c.path, c.pattern);
+      }
+      return '';
     },
     sig() { return JSON.stringify(S.sources.map(s => [s.id, s.name, s.enabled, s.state, s.error, s.config])); },
     sourceCard(s) {
@@ -821,20 +980,25 @@
         } }, [1, 5, 10, 30, 60].map(v => h('option', { value: v, text: F('EverySeconds', v), selected: (s.config && s.config.interval) === v })));
         actions.appendChild(h('label', { class: 'check' }, T('Interval'), sel));
       }
+      if (['http', 'mqtt', 'modbus', 'serial', 'folder'].includes(s.kind))
+        actions.appendChild(h('button', { class: 'btn', type: 'button', text: T('Settings'), onclick: () => this.openForm(s.kind, s) }));
       actions.appendChild(h('button', { class: 'btn danger', type: 'button', text: T('Delete'), onclick: async () => {
         if (!confirm(F('ConfirmDelete', s.name, chans.length))) return;
         await api('/api/sources/' + s.id, { method: 'DELETE' });
         await poll(); this.build();
       } }));
+      const sum = this.summary(s);
       return h('div', { class: 'card source' },
         h('div', { class: 'grow' }, h('div', { class: 'name', text: s.name }),
           h('div', { class: 'muted small', text: T('Kind_src_' + s.kind) + ' · ' + F('ChannelCount', chans.length) + ' · ' + F('AddedAt', HD.fmtTime(s.created, false)) }),
-          s.error ? h('div', { class: 'notice error', text: s.error }) : null),
+          sum ? h('div', { class: 'muted small', text: sum }) : null,
+          s.error ? h('div', { class: 'notice error', text: s.error }) : null,
+          s.kind === 'http' ? this.httpHelp(s) : null),
         h('span', { class: 'status ' + state }, icon(state), stateText), actions);
     },
     showDrop() {
       this.importBox.textContent = '';
-      const input = h('input', { type: 'file', accept: '.csv,.txt,.tsv,text/csv', class: 'hidden', onchange: ev => { if (ev.target.files[0]) this.upload(ev.target.files[0]); } });
+      const input = h('input', { type: 'file', accept: '.csv,.txt,.tsv,.xlsx,text/csv', class: 'hidden', onchange: ev => { if (ev.target.files[0]) this.upload(ev.target.files[0]); } });
       const drop = h('div', { class: 'drop' },
         h('p', { text: T('DropCsv') }),
         h('button', { class: 'btn primary', type: 'button', text: T('ChooseFile'), onclick: () => input.click() }), input,
@@ -982,6 +1146,9 @@
     const app = document.getElementById('app');
     app.textContent = '';
     page.render(app, m[2]);
+    // #/sources/add/<kind> opens that form, so a guide can link straight to it.
+    const add = hash.match(/^#\/sources\/add\/(\w+)$/);
+    if (add && key === 'sources' && ['http', 'mqtt', 'modbus', 'serial', 'folder'].includes(add[1])) page.openForm(add[1], null);
     const navKey = key === 'channel' ? 'overview' : key;
     for (const a of document.querySelectorAll('#nav a')) {
       if (a.dataset.key === navKey) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');

@@ -68,11 +68,12 @@ function Set-CompilerTemp {
     }
 }
 
-function Import-HoodataEngine([string]$AppDir) {
+# The engine's C# files, compiled together; the tests and dev\eval add their own files with -Extra.
+function Import-HoodataEngine([string]$AppDir, [string[]]$Extra = @()) {
     if ('Hoodata.Engine' -as [type]) { return }
     Set-CompilerTemp
-    $files = Get-ChildItem (Join-Path $AppDir 'engine') -Filter *.cs | Sort-Object Name | ForEach-Object { $_.FullName }
-    Add-Type -Path $files -ReferencedAssemblies System, System.Core
+    $files = @(Get-ChildItem (Join-Path $AppDir 'engine') -Filter *.cs | Sort-Object Name | ForEach-Object { $_.FullName }) + $Extra
+    Add-Type -Path $files -ReferencedAssemblies System, System.Core, System.Xml, System.Security, System.IO.Compression, System.IO.Compression.FileSystem
 }
 
 # The data stays next to start.bat, where it is easy to find, back up or delete. When that folder cannot be written

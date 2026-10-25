@@ -234,6 +234,16 @@ namespace Hoodata
         public bool Descending;
         public readonly List<string[]> Preview = new List<string[]>();
         public long Size;
+        public int Width;
+
+        // A row with fewer fields than the header gets empty ones; a row with more is not one of the table's.
+        public static string[] Pad(string[] row, int width)
+        {
+            if (row.Length >= width) return row;
+            var r = new string[width];
+            for (int i = 0; i < width; i++) r[i] = i < row.Length ? row[i] : "";
+            return r;
+        }
 
         public void Write(JsonWriter w)
         {
@@ -352,8 +362,11 @@ namespace Hoodata
             foreach (string[] r in records) { int c; counts.TryGetValue(r.Length, out c); counts[r.Length] = c + 1; }
             int width = 0, most = 0;
             foreach (var kv in counts) if (kv.Value > most || (kv.Value == most && kv.Key > width)) { width = kv.Key; most = kv.Value; }
+            // The header can be wider than most rows: their trailing empty cells are often left out.
             int first = 0;
-            while (first < records.Count && records[first].Length != width) first++;
+            while (first < records.Count && records[first].Length < width) first++;
+            width = records[first].Length;
+            layout.Width = width;
 
             string[] top = records[first];
             int dataLike = 0;
@@ -363,7 +376,7 @@ namespace Hoodata
             layout.Skip = header ? first + 1 : first;
 
             var data = new List<string[]>();
-            for (int i = layout.Skip; i < records.Count; i++) if (records[i].Length == width) data.Add(records[i]);
+            for (int i = layout.Skip; i < records.Count; i++) if (records[i].Length <= width) data.Add(CsvLayout.Pad(records[i], width));
             for (int i = 0; i < Math.Min(8, data.Count); i++) layout.Preview.Add(data[i]);
 
             // A ';' file whose numbers use a decimal comma.
@@ -565,7 +578,8 @@ namespace Hoodata
                 {
                     if (cancel) yield break;
                     if (index++ < Layout.Skip) continue;
-                    if (rec.Length != width) { Skipped++; continue; }
+                    if (rec.Length > width) { Skipped++; continue; }
+                    rec = CsvLayout.Pad(rec, width);
                     if ((index & 1023) == 0 && progress != null && fs.Length > 0) progress((double)fs.Position / fs.Length);
                     yield return rec;
                 }

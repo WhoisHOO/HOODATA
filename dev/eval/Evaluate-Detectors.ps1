@@ -6,11 +6,7 @@ param([int]$Seed = 7, [string]$Sensitivity = 'all', [string]$Csv)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $root 'app\HOODATA.Setup.ps1')
-if (-not ('Hoodata.Eval.Synthetic' -as [type])) {
-    Set-CompilerTemp
-    $files = @(Get-ChildItem (Join-Path $root 'app\engine') -Filter *.cs | ForEach-Object { $_.FullName }) + (Join-Path $PSScriptRoot 'Synthetic.cs')
-    Add-Type -Path $files -ReferencedAssemblies System, System.Core
-}
+Import-HoodataEngine (Join-Path $root 'app') -Extra (Join-Path $PSScriptRoot 'Synthetic.cs')
 
 $levels = if ($Sensitivity -eq 'all') { 'low', 'normal', 'high' } else { @($Sensitivity) }
 $rows = foreach ($scenario in [Hoodata.Eval.Synthetic]::All($Seed)) {

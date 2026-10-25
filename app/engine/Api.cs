@@ -113,6 +113,8 @@ namespace Hoodata
                     if (p.Length == 2 && m == "DELETE") return CancelImport(p[1]);
                     break;
                 case "jobs": return Jobs();
+                case "serial-ports": return SerialPorts();
+                case "network": return NetworkInfo();
                 case "patterns":
                     if (p.Length == 1 && m == "GET") return Patterns();
                     if (p.Length == 2 && p[1] == "run" && m == "POST") return RunPatterns(req.BodyJson());
@@ -487,7 +489,12 @@ namespace Hoodata
             w.Arr();
             foreach (SourceRuntime s in e.Sources())
             {
-                w.Obj().Prop("id", s.Info.Id).Prop("kind", s.Info.Kind).Prop("name", s.Info.Name).Key("config").Raw(s.Info.Config)
+                // The encrypted password never goes back to the page; only whether there is one.
+                object cfg;
+                Json.TryParse(s.Info.Config ?? "{}", out cfg);
+                var c = Json.Obj(cfg) ?? new Dictionary<string, object>();
+                c["has_password"] = c.Remove("password_enc");
+                w.Obj().Prop("id", s.Info.Id).Prop("kind", s.Info.Kind).Prop("name", s.Info.Name).Key("config").Raw(Serialize(c))
                     .Prop("enabled", s.Info.Enabled).Prop("created", s.Info.Created)
                     .Prop("state", s.Impl != null ? s.Impl.State : "stopped").Key("error").Str(s.Impl != null ? s.Impl.Error : null).EndObj();
             }
@@ -501,27 +508,79 @@ namespace Hoodata
             return HttpResponse.Json(w);
         }
 
-        static readonly HashSet<string> AddableKinds = new HashSet<string> { "pc" };
+        static readonly HashSet<string> AddableKinds = new HashSet<string> { "pc", "http", "mqtt", "modbus", "serial", "folder" };
+
+        // Config as the page sends it, made ready to keep: a password is encrypted, an HTTP source gets a key.
+        static Dictionary<string, object> PrepareConfig(string kind, Dictionary<string, object> cfg, Dictionary<string, object> old)
+        {
+            cfg = cfg ?? new Dictionary<string, object>();
+            if (kind == "mqtt")
+            {
+                string pw = Json.Str(cfg, "password", "");
+                cfg.Remove("password");
+                if (pw.Length > 0) cfg["password_enc"] = Secrets.Protect(pw);
+                else if (Json.Bool(cfg, "clear_password", false)) cfg.Remove("password_enc");
+                else if (old != null && old.ContainsKey("password_enc")) cfg["password_enc"] = old["password_enc"];
+                cfg.Remove("clear_password");
+            }
+            if (kind == "http")
+            {
+                string key = Json.Str(cfg, "key", "");
+                if (key.Length < 16) key = old != null ? Json.Str(old, "key", "") : "";
+                if (key.Length < 16 || Json.Bool(cfg, "new_key", false)) key = Secrets.NewKey(16);
+                cfg["key"] = key;
+                cfg.Remove("new_key");
+                double port = Json.Num(cfg, "port", 47110);
+                if (port < 1024 || port > 65535) throw new HttpError(400, "bad_port");
+            }
+            if (kind == "folder" && !Directory.Exists(Json.Str(cfg, "path", ""))) throw new HttpError(400, "no_folder");
+            return cfg;
+        }
 
         HttpResponse AddSource(Dictionary<string, object> body)
         {
             string kind = Json.Str(body, "kind", "");
             if (!AddableKinds.Contains(kind)) return HttpResponse.Error(400, "bad_kind");
-            object cfg = Json.Get(body, "config");
-            string config = cfg is Dictionary<string, object> ? Serialize(cfg) : "{}";
+            var cfg = PrepareConfig(kind, Json.Obj(Json.Get(body, "config")), null);
             string name = Json.Str(body, "name", kind).Trim();
-            SourceInfo s = e.AddSource(kind, name.Length > 0 ? name : kind, config, Json.Bool(body, "enabled", true));
+            SourceInfo s = e.AddSource(kind, name.Length > 0 ? name : kind, Serialize(cfg), Json.Bool(body, "enabled", true));
             return HttpResponse.Json(new JsonWriter().Obj().Prop("id", s.Id).EndObj());
         }
 
         HttpResponse UpdateSource(int id, Dictionary<string, object> body)
         {
-            object cfg = Json.Get(body, "config");
+            SourceRuntime src = e.Sources().Find(x => x.Info.Id == id);
+            if (src == null) return HttpResponse.Error(404, "no_source");
+            var cfgIn = Json.Obj(Json.Get(body, "config"));
+            string config = null;
+            if (cfgIn != null)
+            {
+                object old;
+                Json.TryParse(src.Info.Config ?? "{}", out old);
+                // Settings not sent stay as they were (an interval change keeps the address).
+                var merged = new Dictionary<string, object>(Json.Obj(old) ?? new Dictionary<string, object>());
+                foreach (var kv in cfgIn) merged[kv.Key] = kv.Value;
+                config = Serialize(PrepareConfig(src.Info.Kind, merged, Json.Obj(old)));
+            }
             string name = Json.Get(body, "name") is string ? ((string)body["name"]).Trim() : null;
             if (name != null && name.Length == 0) name = null;
-            e.UpdateSource(id, name, cfg is Dictionary<string, object> ? Serialize(cfg) : null,
-                body.ContainsKey("enabled") ? (bool?)Json.Bool(body, "enabled", true) : null);
+            e.UpdateSource(id, name, config, body.ContainsKey("enabled") ? (bool?)Json.Bool(body, "enabled", true) : null);
             return HttpResponse.Json("{\"ok\":true}");
+        }
+
+        HttpResponse SerialPorts()
+        {
+            var w = new JsonWriter().Arr();
+            foreach (string p in SerialSource.Ports()) w.Str(p);
+            return HttpResponse.Json(w.EndArr());
+        }
+
+        HttpResponse NetworkInfo()
+        {
+            var w = new JsonWriter().Obj().Key("addresses").Arr();
+            foreach (string a in Network.Addresses()) w.Str(a);
+            w.EndArr().Prop("host", Environment.MachineName);
+            return HttpResponse.Json(w.EndObj());
         }
 
         // ---- imports ----
@@ -534,6 +593,14 @@ namespace Hoodata
             try
             {
                 using (var fs = File.Create(path)) req.CopyBodyTo(fs, null);
+                if (name.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Excel: the first worksheet becomes a CSV, imported like one.
+                    string csv = path + ".csv";
+                    try { Xlsx.ToCsv(path, csv); }
+                    finally { TryDelete(path); }
+                    path = csv;
+                }
                 ImportJob job = ImportJob.Prepare(path, name);
                 e.AddJob(job);
                 var w = new JsonWriter().Obj().Prop("id", job.Id).Prop("name", job.Name).Key("columns").Arr();

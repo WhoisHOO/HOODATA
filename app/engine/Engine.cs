@@ -383,6 +383,11 @@ namespace Hoodata
             {
                 case "pc": return new PcSource(this, info);
                 case "file": return new FileSource();
+                case "http": return new HttpIngestSource(this, info);
+                case "mqtt": return new MqttSource(this, info);
+                case "modbus": return new ModbusTcpSource(this, info);
+                case "serial": return new SerialSource(this, info);
+                case "folder": return new FolderSource(this, info);
                 default: return new UnknownSource(info.Kind);
             }
         }
@@ -396,12 +401,16 @@ namespace Hoodata
                 foreach (Channel ch in ChannelsOf(s.Info.Id))
                 {
                     ch.Live = s.Impl.Live;
-                    ch.Det.ResumeFloor = s.StartedAt;
+                    ch.Det.ResumeFloor = ResumeFloor(s);
                 }
                 s.Impl.Start();
             }
             catch (Exception e) { Say("source " + s.Info.Id + ": " + e.Message); }
         }
+
+        // Values from before a source started cannot show its gaps (HOODATA was not running then), except for a
+        // folder: its files hold the lines written meanwhile, with their own times.
+        static long ResumeFloor(SourceRuntime s) { return s.Impl is FolderSource ? long.MinValue : s.StartedAt; }
 
         void StopSource(SourceRuntime s)
         {
@@ -563,7 +572,7 @@ namespace Hoodata
             }
             ch = new Channel(this, info);
             ch.Live = src.Impl != null && src.Impl.Live;
-            ch.Det.ResumeFloor = ch.Live ? src.StartedAt : long.MinValue;
+            ch.Det.ResumeFloor = ch.Live ? ResumeFloor(src) : long.MinValue;
             channels[info.Id] = ch;
             byKey[k] = ch;
             return ch;
