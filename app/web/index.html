@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HOODATA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/plot.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <span class="brand">HOODATA</span>
+    <nav id="nav" aria-label="HOODATA"></nav>
+    <div class="header-end">
+      <span id="conn" class="conn" role="status"><span class="dot"></span><span id="conn-text"></span></span>
+      <div class="seg" id="lang" role="group" aria-label="Language">
+        <button type="button" data-lang="ko" aria-pressed="false">한국어</button>
+        <button type="button" data-lang="en" aria-pressed="false">English</button>
+      </div>
+    </div>
+  </header>
+  <main id="app" tabindex="-1"></main>
+</body>
+</html>

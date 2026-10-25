@@ -1,0 +1,13 @@
+﻿HOODATA를 시작할 수 없습니다
+
+이 PC의 보안 정책(App Control 또는 AppLocker)이 PowerShell 스크립트를 제한된 모드로 실행해서,
+HOODATA가 실행될 수 없습니다. 회사나 학교에서 관리하는 PC에서 흔히 이렇습니다.
+이 PC를 관리하는 곳에 문의해 주세요.
+
+----------------------------------------------------------------------
+
+HOODATA cannot start
+
+A security policy on this PC (App Control or AppLocker) runs PowerShell scripts in a restricted
+mode, in which HOODATA cannot run. This is common on PCs managed by a company or a school.
+Please ask whoever manages this PC.

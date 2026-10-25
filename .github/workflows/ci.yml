@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # start.bat runs Windows PowerShell 5.1, so CI does too. No GPU, no devices: the tests run the real engine
+    # with Windows' own SQLite, on 127.0.0.1.
+    runs-on: windows-2025
+    steps:
+      # Pinned to the commit of v7.0.1: a tag can be moved, a commit cannot.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Install Pester 5
+        shell: powershell
+        run: Install-Module Pester -RequiredVersion 5.7.1 -Force -SkipPublisherCheck -Scope CurrentUser
+
+      - name: Run tests
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 5.7.1
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
+
+      - name: Evaluate the detectors
+        shell: powershell
+        run: .\dev\eval\Evaluate-Detectors.ps1
+
+      - name: Render the window
+        shell: powershell
+        env:
+          HOODATA_LANG: en
+          HOODATA_DATA_DIR: ${{ runner.temp }}\hoodata-data
+          HOODATA_SCREENSHOT: ${{ runner.temp }}\window.png
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -STA -File app\HOODATA.ps1
+          if ($LASTEXITCODE -or -not (Test-Path $env:HOODATA_SCREENSHOT)) { throw 'The window did not render.' }

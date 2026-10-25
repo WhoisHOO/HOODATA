@@ -7,7 +7,18 @@ Windows 10/11 · nothing to install · everything stays on your PC · [Apache Li
 [한국어](./README.ko.md)
 
 > **In development.** HOODATA has no release yet. The plan and progress are in [docs/ROADMAP.md](docs/ROADMAP.md)
-> (Korean).
+> (Korean); how anomalies are found, and how well, is in [docs/METHODS.md](docs/METHODS.md).
+
+## Try the development version
+
+1. Click **Code → Download ZIP**. Before extracting it, right-click the ZIP, choose **Properties**, tick
+   **Unblock** and click **OK** (with Smart App Control on, Windows otherwise blocks `start.bat`).
+2. Extract it anywhere and double-click **`start.bat`**. A small HOODATA window opens, and the dashboard opens in
+   your browser. This PC's own values (CPU, memory, disk, network, battery) appear within seconds.
+3. To look at a data file, open **Data sources** and drop a CSV file there.
+
+HOODATA collects while its window is open. The data stays in the `data` folder next to `start.bat`; delete the
+folder to start over.
 
 ## What it will do
 
