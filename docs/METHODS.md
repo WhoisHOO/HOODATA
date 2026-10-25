@@ -52,6 +52,15 @@ Details that keep false alarms down:
   because offices, shops and machines run on a weekly rhythm. The usual range uses the larger of two spreads: the
   spread of the 5-minute means, and the spread between the days' means for that hour. The current day is left out
   of the usual range it is compared with. Holidays are not known.
+- **The daily rhythm is not an anomaly.** Once the usual range for the hour is known, a level change into that range
+  (lights on, a machine started on schedule) is not reported. Neither is a spike that comes on time in a regular
+  cycle: when the last five intervals between spikes vary by less than 10% and a spike arrives within 15% of when
+  the next was due (a compressor, a defrost, an hourly job). A spike off the schedule is still reported.
+- **A channel that often spikes raises its own bar.** When five spikes or level changes come within 1000 values,
+  the threshold *k* of that channel grows by 15%, up to 2.5 times; after 1000 quiet values it falls back by 10%
+  every 200 values.
+- **"Unusual" is one episode.** It ends only after half an hour back in range, and if it comes back within two hours
+  the same event is reopened.
 - **Status.** A channel is *alert* while a gap, stuck value or out-of-range value is open, or for 10 minutes after
   a level change; *warning* while noise or an unusual level is open, or for 10 minutes after a spike.
 
@@ -83,13 +92,45 @@ there were no false positives. On five other seeds, not used for tuning (185 cha
 The 10 false positives at normal: 7 spikes (4 in the machine's running current, 3 in the 1-second pressure), 1 level
 change in the machine and 2 unusual nights in the temperature.
 
-What this does not show:
+This data was made by the same author as the detectors, and the thresholds were set on one seed of it. Real sensors
+fail in ways a generator does not imagine, so the detectors were also run on two public benchmarks with labelled
+real data, with [`dev/eval/Evaluate-Benchmarks.ps1`](../dev/eval/Evaluate-Benchmarks.ps1) (the data is downloaded,
+not kept in this repository), at the normal setting:
 
-- The data was made by the same author as the detectors, and the thresholds were set on one seed of it. Real
-  sensors fail in ways a generator does not imagine. A comparison on public benchmarks with labelled real data is
-  planned ([ROADMAP](ROADMAP.md), stage 5); published benchmarks have known flaws of their own [5].
-- Rare but normal events, such as a machine's start-up surge, are reported, because they are rare. The "fine" mark
-  in the anomaly list is meant for them.
+- **NAB**, the Numenta Anomaly Benchmark [9] (MIT licence, commit `ea702d7`): 58 series, mostly one value every
+  5 minutes, from servers, traffic, ad exchanges, tweets, a machine's temperature and artificial signals, with 116
+  labelled anomaly windows. Scored simply: a window is found when an anomaly overlaps it; an anomaly outside every
+  window counts as a false positive (NAB's own weighted score is not used).
+- **The UCR Time Series Anomaly Archive** [5]: 250 series with one labelled anomaly each after a training part, most
+  of them physiological waveforms (ECG, gait, respiration). Scored as the archive's authors propose: a series is
+  right when the strongest anomaly found after the training part lies within 100 values of the label.
+
+| Benchmark | Found | False positives |
+|---|---|---|
+| NAB, first run | 108 of 116 windows (93%) | 3969 in 365 558 values (10.9 per 1000) |
+| NAB, after the changes below | 107 of 116 windows (92%) | 2241 (6.1 per 1000) |
+| UCR | right in 28 of 250 series (11%); an anomaly near the label in 176 (70%) | median 79 per series after the training part |
+
+The first NAB run showed three ways real data differs from the synthetic data, and the detectors were changed for
+them (the "daily rhythm", "raises its own bar" and "one episode" rules above): signals with a strong daily shape gave
+a level change at every daily transition, a CPU load with an hourly job gave a spike every hour (1 092 of them in
+one series), and a long unusual period was cut into hundreds of short ones. NAB is therefore no longer an unseen
+test; UCR was run only after these changes and was not used for any of them. The synthetic results above did not
+change.
+
+What these numbers say:
+
+- On NAB most labelled windows are found, but HOODATA also reports a lot outside them: about 1.8 per channel and day
+  at 5-minute values. Part of this is data that really is missing (224 gaps, mostly in the traffic series), and NAB's
+  labels are known to be incomplete [5]; part is HOODATA reporting rare but normal bursts (tweet volumes, server
+  load). Those are what the "fine" mark and the low sensitivity are for.
+- On UCR HOODATA is weak, and this is expected: most of its anomalies are a heartbeat or a step of a different
+  *shape*, inside a waveform sampled hundreds of times a second. HOODATA looks at single values and levels; it is
+  made for sensor readings that change over seconds to hours, not for the shape of a waveform.
+
+Other limits:
+
+- Rare but normal events, such as a machine's start-up surge, are reported, because they are rare.
 - Only one channel is looked at a time. Relations between channels are the job of the pattern analysis.
 
 # How HOODATA finds patterns
@@ -156,3 +197,5 @@ for the temperature channel, which had nothing put in.
 [7] Herrera, F., Carmona, C. J., González, P., & del Jesus, M. J. (2011). An overview on subgroup discovery: foundations and applications. *Knowledge and Information Systems*, 29(3), 495–525. DOI: 10.1007/s10115-010-0356-2 · verified 2026-10-25
 
 [8] Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. *Journal of the Royal Statistical Society: Series B (Methodological)*, 57(1), 289–300. DOI: 10.1111/j.2517-6161.1995.tb02031.x · verified 2026-10-25
+
+[9] Lavin, A., & Ahmad, S. (2015). Evaluating real-time anomaly detection algorithms – the Numenta Anomaly Benchmark. *2015 IEEE 14th International Conference on Machine Learning and Applications (ICMLA)*, 38–44. DOI: 10.1109/ICMLA.2015.141 · verified 2026-10-25

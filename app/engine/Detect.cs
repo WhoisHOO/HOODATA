@@ -151,6 +151,11 @@ namespace Hoodata
         EventRec lastSpike;
         int lastSpikeCount;
         bool consecutiveNow;
+        // A channel that spikes often (CPU load, message counts) raises its own bar, up to 2.5 times, and lowers it
+        // again when it calms down: what happens every few hours is its normal, not an anomaly.
+        double kMult = 1, pendK;
+        readonly Ring spikeAt = new Ring(16);
+        readonly Ring spikeTimes = new Ring(8);   // when the last spikes started, to see a regular cycle
 
         // stuck
         long runStart = long.MinValue, runEnd;
@@ -287,6 +292,7 @@ namespace Hoodata
 
             CheckRange(t, v);
             consecutiveNow = consecutive && prevT != long.MinValue;
+            if (n % 200 == 0 && kMult > 1 && (spikeAt.Count == 0 || n - (long)spikeAt.Last > 1000)) kMult = Math.Max(1, kMult * 0.9);
             CheckSpike(t, v);
             CheckStuck(t, v, consecutive);
             CheckNoisy(t);
@@ -332,7 +338,7 @@ namespace Hoodata
             if (pendV.Count > 0)
             {
                 double dev = v - pendMed;
-                if (Math.Abs(dev) <= 0.5 * cfg.SpikeK * pendScale)
+                if (Math.Abs(dev) <= 0.5 * pendK * pendScale)
                 {
                     ReportSpike();
                     win.Add(v);
@@ -354,10 +360,12 @@ namespace Hoodata
                 // morning warm-up drifts away from the median without ever jumping.
                 double jump = Math.Max(double.IsNaN(noise) ? 0 : noise * Math.Sqrt(2), double.IsInfinity(step) ? 0 : step);
                 bool sudden = !consecutiveNow || Math.Abs(v - prevV) > 0.5 * cfg.SpikeK * jump;
-                if (scale > 0 && sudden && Math.Abs(v - med) > cfg.SpikeK * scale)
+                double k = cfg.SpikeK * kMult;
+                if (scale > 0 && sudden && Math.Abs(v - med) > k * scale)
                 {
                     pendMed = med;
                     pendScale = scale;
+                    pendK = k;
                     pendV.Add(v);
                     pendT.Add(t);
                     return;
@@ -375,7 +383,10 @@ namespace Hoodata
             long t0 = pendT[0], t1 = pendT[pendT.Count - 1];
             pendV.Clear();
             pendT.Clear();
-            if (Quiet) return;
+            CountSpike();
+            bool cycle = OnSchedule(t0);
+            spikeTimes.Add(t0);
+            if (Quiet || cycle) return;
 
             // Spikes close together are one event, so a bad stretch is one line in the record.
             double ti = TypicalInterval;
@@ -401,6 +412,31 @@ namespace Hoodata
             lastSpikeCount = 1;
         }
 
+        // A spike that comes on time in a regular cycle (a compressor, a defrost, an hourly job) is the channel's
+        // rhythm: the last five intervals between spikes vary by under 10%, and this one is within 15% of when the
+        // next was due. A spike off the schedule is still reported.
+        bool OnSchedule(long t0)
+        {
+            if (spikeTimes.Count < 6) return false;
+            int c = spikeTimes.Count;
+            double sum = 0, sum2 = 0;
+            for (int i = c - 5; i < c; i++)
+            {
+                double gap = spikeTimes[i] - spikeTimes[i - 1];
+                sum += gap;
+                sum2 += gap * gap;
+            }
+            double mean = sum / 5, sd = Math.Sqrt(Math.Max(0, sum2 / 5 - mean * mean));
+            if (mean <= 0 || sd > 0.1 * mean) return false;
+            return Math.Abs(t0 - (spikeTimes.Last + mean)) <= 0.15 * mean;
+        }
+
+        void CountSpike()
+        {
+            spikeAt.Add(n);
+            if (spikeAt.Count >= 5 && n - spikeAt[spikeAt.Count - 5] < 1000) kMult = Math.Min(2.5, kMult * 1.15);
+        }
+
         static string SpikeDetail(int count, double scale)
         {
             return "{\"count\":" + count + ",\"scale\":" + D(scale) + "}";
@@ -411,7 +447,12 @@ namespace Hoodata
             var vals = pendV.ToArray();
             double level = Robust.Median((double[])vals.Clone());
             double shift = level - pendMed;
-            if (!Quiet)
+            CountSpike();
+            // A change into the usual range for this time of day is the daily rhythm (lights on, a machine started on
+            // schedule), not an anomaly.
+            double um, us;
+            bool routine = UsualRange(pendT[0], out um, out us) && Math.Abs(level - um) <= cfg.UnusualK * us;
+            if (!Quiet && !routine)
             {
                 EventRec e = sink.Open(Kinds.Step, pendT[0], level, pendMed, Math.Abs(shift) / pendScale,
                     "{\"before\":" + D(pendMed) + ",\"after\":" + D(level) + ",\"scale\":" + D(pendScale) + "}");
@@ -565,13 +606,16 @@ namespace Hoodata
             profileDay[i].Add(LocalDay(t));
         }
 
-        void CloseBlock(long t, double mean)
+        // The usual level for the hour of `t`: the median and spread of the 5-minute means of earlier days (five at
+        // least) of the same day type. The spread is the larger of the spread of the means and the spread between the
+        // days' own means, so a day that is just warmer than the others does not look unusual.
+        bool UsualRange(long t, out double med, out double s)
         {
-            int idx = ProfileIndex(t), h = idx % 24;
+            med = 0;
+            s = 0;
+            int idx = ProfileIndex(t);
             Ring p = profile[idx], pd = profileDay[idx];
             double today = LocalDay(t);
-            // The usual range comes from earlier days only, and needs five of them: with fewer, the spread from one
-            // day to the next is not known yet.
             var earlier = new List<double>();
             var dayMeans = new Dictionary<double, double[]>();
             for (int i = 0; i < p.Count; i++)
@@ -583,42 +627,64 @@ namespace Hoodata
                 acc[0] += p[i];
                 acc[1]++;
             }
-            if (dayMeans.Count >= 5 && earlier.Count >= 24)
+            if (dayMeans.Count < 5 || earlier.Count < 24) return false;
+            double mad;
+            Robust.MedianMad(earlier.ToArray(), out med, out mad);
+            s = Robust.MadToSd * mad;
+            var means = new double[dayMeans.Count];
+            int k = 0;
+            foreach (double[] acc in dayMeans.Values) means[k++] = acc[0] / acc[1];
+            double dm, dmad;
+            Robust.MedianMad(means, out dm, out dmad);
+            if (Robust.MadToSd * dmad > s) s = Robust.MadToSd * dmad;
+            if (!double.IsInfinity(step) && step > s) s = step;
+            return s > 0;
+        }
+
+        EventRec lastUnusual;
+
+        void CloseBlock(long t, double mean)
+        {
+            int h = ProfileIndex(t) % 24;
+            double med, s;
+            if (UsualRange(t, out med, out s))
             {
-                double med, mad;
-                Robust.MedianMad(earlier.ToArray(), out med, out mad);
-                double s = Robust.MadToSd * mad;
-                // The spread between days, from each day's mean for this hour.
-                var means = new double[dayMeans.Count];
-                int k = 0;
-                foreach (double[] acc in dayMeans.Values) means[k++] = acc[0] / acc[1];
-                double dm, dmad;
-                Robust.MedianMad(means, out dm, out dmad);
-                if (Robust.MadToSd * dmad > s) s = Robust.MadToSd * dmad;
-                if (!double.IsInfinity(step) && step > s) s = step;
-                if (s > 0)
+                double z = Math.Abs(mean - med) / s;
+                if (unusualEv == null)
                 {
-                    double z = Math.Abs(mean - med) / s;
-                    if (unusualEv == null)
+                    unusualOver = z > cfg.UnusualK ? unusualOver + 1 : 0;
+                    if (unusualOver >= 3)
                     {
-                        unusualOver = z > cfg.UnusualK ? unusualOver + 1 : 0;
-                        if (unusualOver >= 3)
+                        long start = t - 3 * BlockMs + 1;
+                        // Back within 2 hours of the last one: the same episode, reopened.
+                        if (lastUnusual != null && lastUnusual.T1.HasValue && start - lastUnusual.T1.Value <= 2 * 3600000L && !Quiet)
                         {
-                            unusualEv = Open(Kinds.Unusual, t - 3 * BlockMs + 1, mean, med, z,
-                                "{\"lo\":" + D(med - cfg.UnusualK * s) + ",\"hi\":" + D(med + cfg.UnusualK * s) + ",\"hour\":" + h + "}");
-                            unusualUnder = 0;
-                        }
-                    }
-                    else
-                    {
-                        if (z > unusualEv.Score.GetValueOrDefault())
-                        {
-                            unusualEv.Value = mean;
-                            unusualEv.Score = z;
+                            unusualEv = lastUnusual;
+                            unusualEv.T1 = null;
+                            if (z > unusualEv.Score.GetValueOrDefault()) { unusualEv.Value = mean; unusualEv.Score = z; }
                             sink.Changed(unusualEv);
                         }
-                        unusualUnder = z < cfg.UnusualK - 1 ? unusualUnder + 1 : 0;
-                        if (unusualUnder >= 3) { Close(ref unusualEv, t); unusualOver = 0; }
+                        else
+                            unusualEv = Open(Kinds.Unusual, start, mean, med, z,
+                                "{\"lo\":" + D(med - cfg.UnusualK * s) + ",\"hi\":" + D(med + cfg.UnusualK * s) + ",\"hour\":" + h + "}");
+                        unusualUnder = 0;
+                    }
+                }
+                else
+                {
+                    if (z > unusualEv.Score.GetValueOrDefault())
+                    {
+                        unusualEv.Value = mean;
+                        unusualEv.Score = z;
+                        sink.Changed(unusualEv);
+                    }
+                    // Over only after half an hour back in range.
+                    unusualUnder = z < cfg.UnusualK - 1 ? unusualUnder + 1 : 0;
+                    if (unusualUnder >= 6)
+                    {
+                        lastUnusual = unusualEv;
+                        Close(ref unusualEv, t);
+                        unusualOver = 0;
                     }
                 }
             }
