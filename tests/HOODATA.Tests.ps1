@@ -31,7 +31,8 @@ Describe 'Source files' {
         $used += [regex]::Matches($ps, "Format-Text '(\w+)'") | ForEach-Object { $_.Groups[1].Value }
         # Keys put together in code.
         foreach ($k in 'gap', 'spike', 'step', 'stuck', 'range', 'noisy', 'unusual') { $used += "Kind_$k"; $used += "KindHelp_$k" }
-        foreach ($s in 'ok', 'warn', 'alert', 'learning', 'idle') { $used += "Status_$s" }
+        foreach ($s in 'ok', 'warn', 'alert', 'learning', 'idle', 'paused') { $used += "Status_$s" }
+        $used += 'ShowHidden', 'HideHidden', 'StoreError', 'DataFolderAt', 'SharedFolderWarning', 'ErrGeneric'
         foreach ($s in 'pc', 'file', 'http', 'mqtt', 'modbus', 'serial', 'xlsx', 'folder') { $used += "Kind_src_$s" }
         foreach ($r in '1h', '6h', '24h', '7d', '30d', 'all') { $used += "Range_$r" }
         foreach ($k in 'cpu', 'memory', 'disk', 'net_in', 'net_out', 'battery', 'plugged') { $used += "Pc_$k" }

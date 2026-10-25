@@ -40,6 +40,8 @@ namespace Hoodata
         public SourceInfo Info;
         public ISource Impl;
         public long StartedAt;
+        public string Warning;   // e.g. too_many_channels
+        public long FutureAt;    // when a value dated in the future last came
     }
 
     sealed class Batch
@@ -79,7 +81,11 @@ namespace Hoodata
             Det = new Detector(this, engine.Settings) { Lo = info.Lo, Hi = info.Hi };
         }
 
-        public void Add(long t, double v)
+        // How far ahead of this PC's clock a running source's value may be dated. One value dated years ahead (a typo
+        // in a logger's line, a device whose clock is wrong) would otherwise make every later value look old.
+        public const long FutureMarginMs = 10 * 60000;
+
+        public void Add(long t, double v, long now)
         {
             if (Det.LastT != long.MinValue && t <= Det.LastT)
             {
@@ -87,6 +93,7 @@ namespace Hoodata
                 engine.AddPending(new Sample(Info.Id, t, v));
                 return;
             }
+            if (Live) Det.Arrived(now, t);
             Det.Feed(t, v);
             AddToMinute(t, v);
             Remember(t, v);
@@ -141,14 +148,19 @@ namespace Hoodata
         {
             if (mN == 0) return;
             double noise = Det.Noise;
+            double sd = mN > 1 ? Math.Sqrt(mM2 / (mN - 1)) : 0;
+            // Values near the ends of the double range can overflow the sums; such a minute is not summarised.
+            if (!IsFinite(mMean) || !IsFinite(mMin) || !IsFinite(mMax)) { mN = 0; return; }
             engine.AddPending(new MinuteRow
             {
                 Ch = Info.Id, T = mStart, N = mN, Min = mMin, Max = mMax, Mean = mMean,
-                Sd = mN > 1 ? Math.Sqrt(mM2 / (mN - 1)) : 0,
-                Noise = double.IsNaN(noise) ? (double?)null : noise
+                Sd = IsFinite(sd) ? sd : 0,
+                Noise = IsFinite(noise) ? noise : (double?)null
             });
             mN = 0;
         }
+
+        static bool IsFinite(double v) { return !double.IsNaN(v) && !double.IsInfinity(v); }
 
         public string Status(long now)
         {
@@ -169,9 +181,12 @@ namespace Hoodata
             return e;
         }
 
+        // A change is a new detection too (another spike merged in, an episode reopened or growing), so it keeps the
+        // status held like an opening does.
         public void Changed(EventRec e)
         {
             engine.Store.UpdateEvent(e);
+            if (Kinds.IsAlert(e.Kind)) LastAlertT = Clock.Now(); else LastWarnT = Clock.Now();
             engine.LogEvent("change", e);
         }
 
@@ -185,7 +200,7 @@ namespace Hoodata
 
     public sealed class Engine : IDisposable
     {
-        public const string Version = "0.1.0-dev";
+        public const string Version = "0.1.0";
         public readonly string AppDir, DataDir, WebDir;
         public Store Store;
         public DetectSettings Settings = DetectSettings.For("normal");
@@ -210,7 +225,22 @@ namespace Hoodata
         HttpServer http;
         Api api;
         public long StartedAt;
-        public long Received, Invalid;
+        public long Received, Invalid, Future, Dropped;
+
+        // The browser's cookie: a token made at each start (not the lasting key), under a name of its own for each data
+        // folder, so that two HOODATAs on one PC do not overwrite each other's.
+        public string Session, CookieName;
+
+        // Set while values cannot be written (a full disk, a locked file); shown on the dashboard and in the window.
+        public volatile string StoreError;
+        int flushFailures;
+
+        // One message cannot make unlimited channels: a source gets at most this many.
+        public const int MaxChannelsPerSource = 1000;
+        readonly Dictionary<int, int> channelsPerSource = new Dictionary<int, int>();
+
+        // Adding, changing and removing sources happen one at a time, so a stopped source is never restarted twice.
+        readonly object lifecycle = new object();
 
         public Engine(string appDir, string dataDir)
         {
@@ -262,6 +292,12 @@ namespace Hoodata
 
         public int ChannelCount { get { lock (Gate) return channels.Count; } }
 
+        static string Hash8(string s)
+        {
+            using (var sha = SHA256.Create())
+                return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(s)), 0, 4).Replace("-", "").ToLowerInvariant();
+        }
+
         public long NextSeq() { return Interlocked.Increment(ref seq); }
         public long Seq { get { return Interlocked.Read(ref seq); } }
 
@@ -287,6 +323,10 @@ namespace Hoodata
             if (ret != null && int.TryParse(ret, out r) && r > 0) RetentionDays = r;
             string lang = Store.GetMeta("lang");
             if (lang != null) Lang = lang;
+            Session = Secrets.NewKey(24);
+            CookieName = "hoodata_" + Hash8(DataDir.ToLowerInvariant());
+            // Copies of uploads that were never imported (a closed preview, a stopped HOODATA).
+            try { foreach (string f in Directory.GetFiles(UploadDir)) File.Delete(f); } catch (IOException) { } catch (UnauthorizedAccessException) { }
 
             var list = Store.LoadSources();
             if (list.Count == 0 && Store.GetMeta("first_run") == null)
@@ -304,6 +344,9 @@ namespace Hoodata
                     var ch = new Channel(this, c);
                     channels[c.Id] = ch;
                     byKey[c.Source + "\u0001" + c.Key] = ch;
+                    int n;
+                    channelsPerSource.TryGetValue(c.Source, out n);
+                    channelsPerSource[c.Source] = n + 1;
                     WarmUp(ch);
                 }
             }
@@ -344,11 +387,18 @@ namespace Hoodata
                 t.Reverse();
                 v.Reverse();
                 long first = t.Count > 0 ? t[0] : long.MaxValue;
-                // The usual level for each hour of the day, from the last two weeks of summaries.
+                // The usual level for each hour of the day. Five weeks back, so that a weekend hour has the five earlier
+                // weekend days it needs.
                 using (var st = rd.Db.Prepare("SELECT t / 300000, sum(mean * n) / sum(n) FROM minute WHERE ch = ?1 AND t >= ?2 AND t < ?3 GROUP BY t / 300000 ORDER BY 1"))
                 {
-                    st.Bind(1, ch.Info.Id).Bind(2, Clock.Now() - 14L * 86400000).Bind(3, first);
+                    st.Bind(1, ch.Info.Id).Bind(2, Clock.Now() - 35L * 86400000).Bind(3, first);
                     while (st.Step()) ch.Det.AddToProfile(st.GetLong(0) * 300000 + 299999, st.GetDouble(1));
+                }
+                // The usual noise at each level, from the noise each minute summary kept (about the last 3.5 days).
+                using (var st = rd.Db.Prepare("SELECT t, noise, mean FROM minute WHERE ch = ?1 AND t >= ?2 AND t < ?3 AND noise IS NOT NULL ORDER BY t"))
+                {
+                    st.Bind(1, ch.Info.Id).Bind(2, Clock.Now() - 84L * 3600000).Bind(3, first);
+                    while (st.Step()) ch.Det.AddNoiseEstimate(st.GetLong(0), st.GetDouble(1), st.GetDouble(2));
                 }
                 for (int i = 0; i < t.Count; i++) ch.Replay(t[i], v[i]);
             }
@@ -357,6 +407,12 @@ namespace Hoodata
         public void Stop()
         {
             if (stopping) return;
+            lock (lifecycle) StopAll();
+        }
+
+        void StopAll()
+        {
+            if (http != null) http.Stop();   // the dashboard goes first: nothing is changed while stopping
             List<SourceRuntime> all;
             lock (Gate) all = new List<SourceRuntime>(sources.Values);
             foreach (SourceRuntime s in all) StopSource(s);
@@ -368,7 +424,6 @@ namespace Hoodata
                 foreach (Channel ch in channels.Values) { ch.FlushMinute(); ch.Det.Suspend(); }
             }
             Flush();
-            if (http != null) http.Stop();
             if (Store != null) Store.Dispose();
             Say("HOODATA stopped");
         }
@@ -402,6 +457,7 @@ namespace Hoodata
                 {
                     ch.Live = s.Impl.Live;
                     ch.Det.ResumeFloor = ResumeFloor(s);
+                    ch.Det.WatchFrom = s.StartedAt;
                 }
                 s.Impl.Start();
             }
@@ -428,46 +484,62 @@ namespace Hoodata
 
         public SourceInfo AddSource(string kind, string name, string config, bool enabled)
         {
-            SourceInfo info = Store.AddSource(kind, name, config, enabled);
-            var s = new SourceRuntime { Info = info };
-            lock (Gate)
+            lock (lifecycle)
             {
-                sources[info.Id] = s;
-                if (enabled) StartSource(s);
+                if (stopping) throw new HttpError(503, "stopping");
+                SourceInfo info = Store.AddSource(kind, name, config, enabled);
+                var s = new SourceRuntime { Info = info };
+                lock (Gate)
+                {
+                    sources[info.Id] = s;
+                    if (enabled) StartSource(s);
+                }
+                return info;
             }
-            return info;
         }
 
         public void UpdateSource(int id, string name, string config, bool? enabled)
         {
-            SourceRuntime s;
-            lock (Gate) if (!sources.TryGetValue(id, out s)) throw new HttpError(404, "no_source");
-            StopSource(s);
-            WaitForQueue();   // the stop is processed before the restart
-            lock (Gate)
+            lock (lifecycle)
             {
-                if (name != null) s.Info.Name = name;
-                if (config != null) s.Info.Config = config;
-                if (enabled.HasValue) s.Info.Enabled = enabled.Value;
-                Store.UpdateSource(s.Info);
-                s.Impl = null;
-                if (s.Info.Enabled) StartSource(s);
+                if (stopping) throw new HttpError(503, "stopping");
+                SourceRuntime s;
+                lock (Gate) if (!sources.TryGetValue(id, out s)) throw new HttpError(404, "no_source");
+                StopSource(s);
+                WaitForQueue();   // the stop is processed before the restart
+                lock (Gate)
+                {
+                    if (name != null) s.Info.Name = name;
+                    // New settings can mean a new rhythm (a poll every 20 s instead of every second).
+                    if (config != null && config != s.Info.Config)
+                        foreach (Channel ch in ChannelsOf(id)) ch.Det.ResetRhythm();
+                    if (config != null) s.Info.Config = config;
+                    if (enabled.HasValue) s.Info.Enabled = enabled.Value;
+                    Store.UpdateSource(s.Info);
+                    s.Impl = null;
+                    s.Warning = null;
+                    if (s.Info.Enabled) StartSource(s);
+                }
             }
         }
 
         public void DeleteSource(int id)
         {
-            SourceRuntime s;
-            lock (Gate) if (!sources.TryGetValue(id, out s)) throw new HttpError(404, "no_source");
-            StopSource(s);
-            WaitForQueue();
-            lock (Gate)
+            lock (lifecycle)
             {
-                foreach (Channel ch in ChannelsOf(id)) { channels.Remove(ch.Info.Id); byKey.Remove(id + "\u0001" + ch.Info.Key); }
-                sources.Remove(id);
+                SourceRuntime s;
+                lock (Gate) if (!sources.TryGetValue(id, out s)) throw new HttpError(404, "no_source");
+                StopSource(s);
+                WaitForQueue();
+                lock (Gate)
+                {
+                    foreach (Channel ch in ChannelsOf(id)) { channels.Remove(ch.Info.Id); byKey.Remove(id + "\u0001" + ch.Info.Key); }
+                    sources.Remove(id);
+                    channelsPerSource.Remove(id);
+                }
+                Flush();
+                Store.DeleteSource(id);
             }
-            Flush();
-            Store.DeleteSource(id);
         }
 
         public List<SourceRuntime> Sources()
@@ -546,12 +618,22 @@ namespace Hoodata
                     foreach (Channel ch in ChannelsOf(b.Source)) { ch.FlushMinute(); ch.Det.Suspend(); ch.Live = false; }
                     return;
                 }
+                long now = Clock.Now();
+                int future = 0, taken = 0;
                 foreach (Reading r in b.Items)
                 {
                     if (double.IsNaN(r.V) || double.IsInfinity(r.V) || r.Key == null) { Invalid++; continue; }
+                    Channel ch = Resolve(src, r.Key, b.Hints);
+                    if (ch == null) { Dropped++; continue; }
+                    if (ch.Live && r.T > now + Channel.FutureMarginMs) { Future++; future++; continue; }
                     Received++;
-                    Resolve(src, r.Key, b.Hints).Add(r.T, r.V);
+                    taken++;
+                    ch.Add(r.T, r.V, now);
                 }
+                // Said on the source until ten minutes after the last such value (one source can take values from
+                // several devices, and only one of them may have its clock wrong).
+                if (future > 0) { src.Warning = "future_times"; src.FutureAt = now; }
+                else if (src.Warning == "future_times" && now - src.FutureAt > 600000) src.Warning = null;
             }
             if (b.Done != null) b.Done.Set();
         }
@@ -561,6 +643,14 @@ namespace Hoodata
             Channel ch;
             string k = src.Info.Id + "\u0001" + key;
             if (byKey.TryGetValue(k, out ch)) return ch;
+            int count;
+            channelsPerSource.TryGetValue(src.Info.Id, out count);
+            if (count >= MaxChannelsPerSource)
+            {
+                src.Warning = "too_many_channels";
+                return null;
+            }
+            channelsPerSource[src.Info.Id] = count + 1;
             ChannelHint hint = null;
             if (hints != null) hints.TryGetValue(key, out hint);
             ChannelInfo info = Store.AddChannel(src.Info.Id, key, hint != null && hint.Name != null ? hint.Name : key, hint != null ? hint.Unit : "");
@@ -573,6 +663,7 @@ namespace Hoodata
             ch = new Channel(this, info);
             ch.Live = src.Impl != null && src.Impl.Live;
             ch.Det.ResumeFloor = ch.Live ? ResumeFloor(src) : long.MinValue;
+            if (ch.Live) ch.Det.WatchFrom = src.StartedAt;
             channels[info.Id] = ch;
             byKey[k] = ch;
             return ch;
@@ -586,19 +677,56 @@ namespace Hoodata
         internal void AddPending(Sample s) { pendingSamples.Add(s); }
         internal void AddPending(MinuteRow m) { pendingMinutes.Add(m); }
 
+        readonly object flushLock = new object();
+
+        // A batch that cannot be written (a full disk, a locked file) is kept and tried again, so nothing is lost when
+        // the cause goes away; while it lasts, StoreError says so. Waiting values are capped at about a million. A
+        // batch the database refuses as such (a constraint, a wrong type) would fail again every time: it is dropped.
         void Flush()
         {
-            List<Sample> s;
-            List<MinuteRow> m;
-            lock (Gate)
+            lock (flushLock)
             {
-                if (pendingSamples.Count == 0 && pendingMinutes.Count == 0) return;
-                s = new List<Sample>(pendingSamples);
-                m = new List<MinuteRow>(pendingMinutes);
-                pendingSamples.Clear();
-                pendingMinutes.Clear();
+                List<Sample> s;
+                List<MinuteRow> m;
+                lock (Gate)
+                {
+                    if (pendingSamples.Count == 0 && pendingMinutes.Count == 0) return;
+                    s = new List<Sample>(pendingSamples);
+                    m = new List<MinuteRow>(pendingMinutes);
+                    pendingSamples.Clear();
+                    pendingMinutes.Clear();
+                }
+                try
+                {
+                    Store.Write(s, m);
+                    if (StoreError != null) Say("writing works again after " + flushFailures + " failures");
+                    StoreError = null;
+                    flushFailures = 0;
+                }
+                catch (SqliteException e)
+                {
+                    int code = e.Code & 0xFF;
+                    if (code == 18 || code == 19 || code == 20 || code == 25)   // TOOBIG, CONSTRAINT, MISMATCH, RANGE
+                    {
+                        Say("dropped " + s.Count + " values and " + m.Count + " minutes that cannot be written: " + e.Message);
+                        lock (Gate) Dropped += s.Count;
+                        return;
+                    }
+                    if (flushFailures++ == 0) Say("cannot write: " + e.Message);
+                    StoreError = e.Message;
+                    lock (Gate)
+                    {
+                        pendingSamples.InsertRange(0, s);
+                        pendingMinutes.InsertRange(0, m);
+                        const int Cap = 1000000;
+                        if (pendingSamples.Count > Cap)
+                        {
+                            Dropped += pendingSamples.Count - Cap;
+                            pendingSamples.RemoveRange(0, pendingSamples.Count - Cap);
+                        }
+                    }
+                }
             }
-            Store.Write(s, m);
         }
 
         // Raw values from running sources are kept for RetentionDays; imported files keep theirs until removed.
@@ -696,10 +824,13 @@ namespace Hoodata
 
         // ---- imports ----
 
+        // A new upload replaces a preview that was left without importing or cancelling, and old ones expire.
         public void AddJob(ImportJob job)
         {
             lock (Gate)
             {
+                foreach (ImportJob j in Jobs)
+                    if (j.State == "ready") j.Abandon();
                 Jobs.RemoveAll(j => j.Finished && Clock.Now() - j.FinishedAt > 3600000);
                 Jobs.Add(job);
             }

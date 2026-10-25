@@ -176,7 +176,12 @@ namespace Hoodata
             throw db.Error(rc);
         }
 
-        public void Run() { while (Step()) { } Reset(); }
+        // Reset also when a step fails: a statement left halted refuses every later bind (SQLITE_MISUSE).
+        public void Run()
+        {
+            try { while (Step()) { } }
+            finally { Reset(); }
+        }
 
         public void Reset()
         {

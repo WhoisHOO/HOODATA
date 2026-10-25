@@ -78,7 +78,8 @@ namespace Hoodata
             if (low == "true" || low == "on" || low == "yes") { v = 1; return true; }
             if (low == "false" || low == "off" || low == "no") { v = 0; return true; }
             if (decimalComma) s = s.Replace(".", "").Replace(',', '.');
-            else if (s.IndexOf(',') > 0 && Regex.IsMatch(s, @"^[-+]?\d{1,3}(,\d{3})+(\.\d+)?$")) s = s.Replace(",", "");
+            // 1,234.5 with thousands separators (quoted in a comma file); never 0,125, which is a decimal comma.
+            else if (s.IndexOf(',') > 0 && Regex.IsMatch(s, @"^[-+]?[1-9]\d{0,2}(,\d{3})+(\.\d+)?$")) s = s.Replace(",", "");
             if (double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) return !double.IsNaN(v) && !double.IsInfinity(v);
             Match m = Leading.Match(s);
             if (!m.Success) return false;
@@ -135,6 +136,19 @@ namespace Hoodata
             return p.IndexOf('d') >= 0 && p.IndexOf('d') < p.IndexOf('M');
         }
 
+        // The date part of a date-and-time format; null when it has none. A date alone in a date-and-time column is
+        // that day's midnight: Excel shows midnight in a column of times as the date only.
+        static string DatePart(string format)
+        {
+            int cut = -1;
+            foreach (string sep in new[] { " H", " h", " tt", "T" })
+            {
+                int i = format.IndexOf(sep, StringComparison.Ordinal);
+                if (i > 0 && (cut < 0 || i < cut)) cut = i;
+            }
+            return cut > 0 ? format.Substring(0, cut) : null;
+        }
+
         public static string Detect(IList<string> samples, string[] formats)
         {
             var values = new List<string>();
@@ -145,13 +159,16 @@ namespace Hoodata
             bool dayFirst = PreferDayFirst();
             foreach (string f in formats)
             {
-                int ok = 0;
+                int ok = 0, dateOnly = 0;
+                string day = formats == DateTimeFormats ? DatePart(f) : null;
                 foreach (string v in values)
                 {
                     DateTime dt;
                     if (DateTime.TryParseExact(v, f, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt)) ok++;
+                    else if (day != null && DateTime.TryParseExact(v, day, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt)) { ok++; dateOnly++; }
                 }
-                double ratio = ok / (double)values.Count;
+                // Mostly dates alone: a date column, not a time column.
+                double ratio = dateOnly * 2 > values.Count ? 0 : ok / (double)values.Count;
                 bool better = ratio > bestRatio + 1e-9;
                 // A tie between month-first and day-first: follow the PC.
                 if (!better && Math.Abs(ratio - bestRatio) < 1e-9 && best != null && dayFirst && f.StartsWith("d") && best.StartsWith("M/d")) better = true;
@@ -190,7 +207,11 @@ namespace Hoodata
                 return true;
             }
             DateTime dt;
-            if (!DateTime.TryParseExact(Normalize(s), format, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt)) return false;
+            string n = Normalize(s), day;
+            if (!DateTime.TryParseExact(n, format, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt) &&
+                !(Array.IndexOf(DateTimeFormats, format) >= 0 && (day = DatePart(format)) != null &&
+                  DateTime.TryParseExact(n, day, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out dt)))
+                return false;
             return ToMs(dt, zone, out ms);
         }
 
@@ -216,6 +237,7 @@ namespace Hoodata
         public int Index;
         public string Header, Name, Unit, Kind;   // kind: time, date, clock, epoch, number, text
         public string Format;
+        public bool DecimalComma;
         public double NumberRatio;
         public readonly List<string> Samples = new List<string>();
     }
@@ -267,6 +289,8 @@ namespace Hoodata
 
     public static class CsvAnalyzer
     {
+        public const int MaxColumns = 1000;
+
         static readonly string[] TimeWords = { "time", "date", "timestamp", "datetime", "ts", "epoch", 
             // Korean: time, date and time, date, time of day, measured, recorded
             "\uC2DC\uAC04", "\uC77C\uC2DC", "\uB0A0\uC9DC", "\uC2DC\uAC01", "\uCE21\uC815", "\uAE30\uB85D" };
@@ -288,9 +312,39 @@ namespace Hoodata
                 return new UTF8Encoding(false);
             }
             catch (DecoderFallbackException) { }
-            // Excel on a Korean Windows saves CSV as CP949.
+            // Not UTF-8: Excel saved it in the Windows code page. Korean (CP949) when it reads as Korean text,
+            // otherwise this PC's own code page (1252 on a Western Windows).
+            Encoding ansi = Encoding.Default;
+            if (ansi.CodePage != 949 && !LooksKorean(head, n))
+            {
+                name = "cp" + ansi.CodePage;
+                return ansi;
+            }
             name = "cp949";
             return Encoding.GetEncoding(949);
+        }
+
+        // Valid CP949 throughout (a character cut at the end of the sample aside), with Hangul syllables or symbols
+        // (such as the degree Celsius sign) of the standard KS X 1001 set, whose two bytes are both 0xA1 or more. A
+        // degree sign before a letter in a Western code page is valid CP949 too, but from its extension, so it does
+        // not count; neither do the Hanja rows, where two accented Western letters can land.
+        static bool LooksKorean(byte[] head, int n)
+        {
+            try
+            {
+                Decoder d = Encoding.GetEncoding(949, EncoderFallback.ExceptionFallback, DecoderFallback.ExceptionFallback).GetDecoder();
+                d.GetCharCount(head, 0, n, false);
+            }
+            catch (DecoderFallbackException) { return false; }
+            int korean = 0;
+            for (int i = 0; i + 1 < n; i++)
+            {
+                byte b = head[i];
+                if (b < 0x80) continue;
+                if (((b >= 0xA1 && b <= 0xAC) || (b >= 0xB0 && b <= 0xC8)) && head[i + 1] >= 0xA1 && head[i + 1] <= 0xFE) korean++;
+                i++;
+            }
+            return korean >= 1;
         }
 
         static char DetectDelimiter(string text)
@@ -317,16 +371,19 @@ namespace Hoodata
                 }
                 int score = 0;
                 foreach (var kv in counts) if (kv.Value > score) score = kv.Value;
-                if (score > bestScore) { best = c; bestScore = score; }
+                // A tie between ',' and ';' with numbers like 21,5 is a ';' file with decimal commas.
+                bool decimalCommas = c == ';' && best == ',' && score == bestScore && Regex.IsMatch(text, @"\d,\d");
+                if (score > bestScore || decimalCommas) { best = c; bestScore = score; }
             }
             return best;
         }
 
-        static bool LooksLikeData(string field)
+        static bool LooksLikeData(string field, bool decimalComma)
         {
             double v;
             string u;
             if (Values.TryNumber(field, false, out v, out u)) return true;
+            if (decimalComma && Values.TryNumber(field, true, out v, out u)) return true;
             string n = TimeParser.Normalize(field);
             foreach (string f in TimeParser.DateTimeFormats)
             {
@@ -336,12 +393,18 @@ namespace Hoodata
             return false;
         }
 
+        public static FileStream OpenShared(string path)
+        {
+            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        }
+
         public static CsvLayout Analyze(string path)
         {
             var layout = new CsvLayout { Size = new FileInfo(path).Length };
             byte[] head = new byte[256 * 1024];
             int n;
-            using (var fs = File.OpenRead(path)) n = fs.Read(head, 0, head.Length);
+            // Shared for writing: a logger can keep the file open while it is read.
+            using (var fs = OpenShared(path)) n = fs.Read(head, 0, head.Length);
             string encName;
             layout.Encoding = DetectEncoding(head, n, out encName);
             layout.EncodingName = encName;
@@ -349,7 +412,7 @@ namespace Hoodata
             layout.Delimiter = DetectDelimiter(text);
 
             var records = new List<string[]>();
-            using (var sr = new StreamReader(path, layout.Encoding, true))
+            using (var sr = new StreamReader(OpenShared(path), layout.Encoding, true))
             {
                 var csv = new CsvReader(sr, layout.Delimiter);
                 string[] rec;
@@ -366,12 +429,14 @@ namespace Hoodata
             int first = 0;
             while (first < records.Count && records[first].Length < width) first++;
             width = records[first].Length;
+            if (width > MaxColumns) throw new HttpError(400, "too_many_columns");
             layout.Width = width;
 
             string[] top = records[first];
             int dataLike = 0;
-            foreach (string f in top) if (LooksLikeData(f)) dataLike++;
-            bool header = dataLike * 2 < top.Length || (first + 1 < records.Count && dataLike < top.Length && Count(records[first + 1]) > dataLike);
+            bool commas = layout.Delimiter != ',';
+            foreach (string f in top) if (LooksLikeData(f, commas)) dataLike++;
+            bool header = dataLike * 2 < top.Length || (first + 1 < records.Count && dataLike < top.Length && Count(records[first + 1], commas) > dataLike);
             layout.HeaderRecord = header ? first : -1;
             layout.Skip = header ? first + 1 : first;
 
@@ -379,18 +444,34 @@ namespace Hoodata
             for (int i = layout.Skip; i < records.Count; i++) if (records[i].Length <= width) data.Add(CsvLayout.Pad(records[i], width));
             for (int i = 0; i < Math.Min(8, data.Count); i++) layout.Preview.Add(data[i]);
 
-            // A ';' file whose numbers use a decimal comma.
-            if (layout.Delimiter == ';')
-            {
-                int commas = 0, total = 0;
-                foreach (string[] r in data) foreach (string f in r) { total++; if (Regex.IsMatch(f.Trim(), @"^[-+]?\d+,\d+$")) commas++; }
-                layout.DecimalComma = commas > 0 && commas * 10 >= total;
-            }
+            // Columns whose numbers use a decimal comma (21,5), decided column by column. Not in a ',' file, where
+            // such a number would have to be quoted and is more likely 1,234. In a ';' file a comma is a decimal
+            // comma; in a tab file (US Excel writes 101,300 there) only when a value cannot be thousands (21,5 or 0,125).
+            var commaColumns = new bool[width];
+            if (layout.Delimiter != ',')
+                for (int c = 0; c < width; c++)
+                {
+                    int withComma = 0, dots = 0;
+                    bool notThousands = layout.Delimiter == ';';
+                    foreach (string[] r in data)
+                    {
+                        string f = r[c].Trim();
+                        if (Regex.IsMatch(f, @"^[-+]?\d+,\d+$"))
+                        {
+                            withComma++;
+                            if (!Regex.IsMatch(f, @"^[-+]?[1-9]\d{0,2}(,\d{3})+$")) notThousands = true;
+                        }
+                        else if (Regex.IsMatch(f, @"^[-+]?\d{1,3}(\.\d{3})+,\d+$")) { withComma++; notThousands = true; }   // 12.345,6
+                        else if (Regex.IsMatch(f, @"^[-+]?\d+\.\d+$")) dots++;
+                    }
+                    commaColumns[c] = withComma > 0 && withComma >= dots && notThousands;
+                    if (commaColumns[c]) layout.DecimalComma = true;
+                }
 
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int c = 0; c < width; c++)
             {
-                var col = new CsvColumn { Index = c };
+                var col = new CsvColumn { Index = c, DecimalComma = commaColumns[c] };
                 col.Header = header ? top[c].Trim() : "col" + (c + 1);
                 if (col.Header.Length == 0) col.Header = "col" + (c + 1);
                 string name, unit;
@@ -409,7 +490,7 @@ namespace Hoodata
                     if (col.Samples.Count < 200) col.Samples.Add(f);
                     double v;
                     string u;
-                    if (Values.TryNumber(f, layout.DecimalComma, out v, out u))
+                    if (Values.TryNumber(f, col.DecimalComma, out v, out u))
                     {
                         numbers++;
                         if (u != null && col.Unit.Length == 0) col.Unit = u;
@@ -438,10 +519,10 @@ namespace Hoodata
             return layout;
         }
 
-        static int Count(string[] rec)
+        static int Count(string[] rec, bool decimalComma)
         {
             int k = 0;
-            foreach (string f in rec) if (LooksLikeData(f)) k++;
+            foreach (string f in rec) if (LooksLikeData(f, decimalComma)) k++;
             return k;
         }
 
@@ -515,6 +596,18 @@ namespace Hoodata
 
         public void Cancel() { cancel = true; }
 
+        // A preview that will never be imported: its copy of the file goes.
+        public void Abandon()
+        {
+            cancel = true;
+            State = "cancelled";
+            Finished = true;
+            FinishedAt = Clock.Now();
+            try { File.Delete(FilePath); } catch { }
+        }
+
+        public bool StartGiven;   // the start time for rows without a time column was chosen by the user
+
         public void Write(JsonWriter w)
         {
             w.Obj().Prop("id", Id).Prop("file", FileName).Prop("name", Name).Prop("state", State).Key("error").Str(Error)
@@ -544,6 +637,14 @@ namespace Hoodata
                 {
                     CsvColumn col = Layout.Columns[c];
                     hints[col.Name] = new ChannelHint { Name = col.Name, Unit = col.Unit };
+                }
+                if (Layout.TimeColumn < 0 && !StartGiven)
+                {
+                    // Rows at a fixed interval end now, so they are in the past like any other data.
+                    long rows = 0;
+                    foreach (string[] rec in DataRows(null)) rows++;
+                    Skipped = 0;
+                    StartMs = Clock.Now() - (long)(Math.Max(0, rows - 1) * IntervalSeconds * 1000);
                 }
                 if (Layout.Descending) ReadAllReversed(engine, hints);
                 else ReadStreaming(engine, hints);
@@ -598,7 +699,7 @@ namespace Hoodata
             {
                 double v;
                 string u;
-                if (Values.TryNumber(rec[c], Layout.DecimalComma, out v, out u))
+                if (Values.TryNumber(rec[c], Layout.Columns[c].DecimalComma, out v, out u))
                 {
                     batch.Add(new Reading(Layout.Columns[c].Name, t, v));
                     ValueCount++;

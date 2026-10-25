@@ -22,8 +22,24 @@ few more values have arrived.
   smaller than it, so a sensor that reports whole numbers is not alarmed by a change of 1.
 - **Usual interval.** The 90th percentile of the last 64 intervals between values (sample quantile, linear
   interpolation [4]). Using a high percentile keeps a source that sends unevenly from looking like one with gaps.
-- **Downtime.** The time while HOODATA itself was not running is never counted against a source: the first value
-  after a start is not a gap, and the interval across the restart is not learned.
+- **Arrival time.** For a running source, silence is measured on this PC's clock from when new values last
+  *arrived*, against the 90th percentile of the last 64 silences between arrivals. Values less than 50 ms apart (one
+  message, one poll, a quick burst) are one arrival, and so is a backlog read in parts (a folder's lines written
+  while HOODATA was closed: their dates run far ahead of the clock). A stream that keeps coming faster than that for a second,
+  dated about as it comes (not a backlog read at once), is silent once it has stopped for the minimum gap, whatever
+  outages it had before. A device's own timestamps can lag or come in batches; they are used only for the
+  intervals between values. A value sent again with a time already seen does not count as an arrival, so a device
+  that keeps repeating its last reading is reported silent. Until the second arrival after a start, HOODATA waits
+  ten minutes before calling a source silent, or five times its usual interval when that is longer: a device that
+  sends a batch a minute must not look silent after its first batch. When a source's settings are changed, what was
+  learned of its rhythm is forgotten, since the new settings may make it send at another rate.
+- **Downtime.** The time while HOODATA itself, or the source, was not running is never counted against a source:
+  the interval across a restart or a pause is not a gap and is not learned. Silence *after* a start counts from the
+  start, folders included, so a sensor that died while the PC was off is reported ten minutes after the start (or
+  five times its usual interval, for a logger that writes less often than every two minutes).
+- **Values from the future.** A running source's value dated more than ten minutes ahead of this PC's clock is not
+  taken (a typo in a logger's line, a device clock or time zone set wrong), so that it cannot make every later value
+  look old. The source says so until ten minutes after the last such value.
 
 ## The anomalies
 
@@ -40,16 +56,21 @@ few more values have arrived.
 Details that keep false alarms down:
 
 - **Spikes and level changes must be sudden.** The value must also jump from the value just before it by more than
-  *k*/2 times the noise. A slow swing or a morning warm-up moves away from the median without ever jumping, and is
-  not reported. Spikes less than 10 intervals (at least a minute) apart are merged into one event with a count.
+  *k*/2 times the deviation of a step between successive values (√2 times the noise), or the resolution if that is
+  larger; *k* here is the setting's own value, not a channel's raised one. A slow swing or a morning warm-up moves
+  away from the median without ever jumping, and is not reported. Spikes less than 10 intervals (at least a minute)
+  apart are merged into one event with a count.
 - **After a level change, the spread is learned again.** A machine that runs is noisier than one that stands still,
   so the old spread does not apply at the new level. For about 16 values the channel shows "learning".
-- **Noise is compared at a similar level.** HOODATA keeps a noise estimate every 5 minutes for about 3.5 days,
-  each with the level it was taken at. The usual noise is the median of up to 32 estimates taken near the current
-  level; with fewer than 16 near ones, noise is not judged. A machine switching on is therefore not "noisy", but
-  a machine that is noisier than on other days while it runs is.
+- **Noise is compared at a similar level.** HOODATA keeps a noise estimate every 5 minutes or every 16 values,
+  whichever is longer, 1024 of them (about 3.5 days at a value a second, longer for slower sources), each with the
+  level it was taken at; after a restart they are rebuilt from the stored minute summaries of the last 3.5 days.
+  Noise is judged once 32 estimates exist; the usual noise is the median of up to 32 estimates taken near the
+  current level, and with fewer than 16 near ones noise is not judged. A machine switching on is therefore not
+  "noisy", but a machine that is noisier than on other days while it runs is.
 - **"Unusual" waits for five earlier days** of the same day type: weekdays and weekends have separate profiles,
-  because offices, shops and machines run on a weekly rhythm. The usual range uses the larger of two spreads: the
+  because offices, shops and machines run on a weekly rhythm. At start the profiles are rebuilt from five weeks of
+  stored summaries. The usual range uses the larger of two spreads: the
   spread of the 5-minute means, and the spread between the days' means for that hour. The current day is left out
   of the usual range it is compared with. Holidays are not known.
 - **The daily rhythm is not an anomaly.** Once the usual range for the hour is known, a level change into that range
@@ -59,10 +80,12 @@ Details that keep false alarms down:
 - **A channel that often spikes raises its own bar.** When five spikes or level changes come within 1000 values,
   the threshold *k* of that channel grows by 15%, up to 2.5 times; after 1000 quiet values it falls back by 10%
   every 200 values.
-- **"Unusual" is one episode.** It ends only after half an hour back in range, and if it comes back within two hours
-  the same event is reopened.
-- **Status.** A channel is *alert* while a gap, stuck value or out-of-range value is open, or for 10 minutes after
-  a level change; *warning* while noise or an unusual level is open, or for 10 minutes after a spike.
+- **"Unusual" is one episode.** It ends only after half an hour back in range (or, for an hour that has no usual
+  range yet, after half an hour that cannot be judged), and if it comes back within two hours the same event is
+  reopened.
+- **Status.** For a running source, a channel is *alert* while a gap, stuck value or out-of-range value is open,
+  and for 10 minutes after any of these or a level change is found or grows; *warning* likewise for spikes, noise
+  and unusual levels. A channel of an imported file shows "imported", one of a paused source "paused".
 
 ## How well it works
 
@@ -146,7 +169,10 @@ slot gets situations:
 - the time of day, in 4-hour bins;
 - the weekday and weekday or weekend, when there are at least two weeks of slots;
 - for every channel, *high* or *low*: its 5-minute mean in its own top or bottom 20%;
-- for a channel with at most four values (a pump on or off, a door open or shut), each value.
+- for a switch (a pump on or off, a door open or shut), each value instead: a channel with at most four values,
+  never anything in between (in no minute is its lowest or highest value another one), that keeps a single value
+  through at least half of its minutes. So a switch read many times a minute is still a switch, and a measurement
+  read many times a minute is not one, even one that rests at 0 while a machine is off.
 
 A channel's own level is not used for its own level changes, unusual levels or spikes: these move the level
 themselves, so the result would only restate them.

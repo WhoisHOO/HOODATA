@@ -193,6 +193,14 @@ namespace Hoodata
         // defines it, and a spike moves the slot's mean itself. Stuck values, gaps and noise do not.
         static bool OwnLevelAllowed(string kind) { return kind == Kinds.Noisy || kind == Kinds.Stuck || kind == Kinds.Gap; }
 
+        // A switch (a pump on or off, a mode) has a few values, never anything in between, and keeps one of them
+        // through most minutes. A measurement read several times a minute has minutes with a single value only by
+        // chance or at one resting value (0 while a machine is off), and its other minutes reach many values.
+        static bool IsSwitch(HashSet<double> values, HashSet<double> extremes, int[] minutes)
+        {
+            return values.Count >= 1 && values.Count <= 4 && extremes.Count <= 4 && minutes[1] >= 0.5 * minutes[0];
+        }
+
         public static PatternResult Run(Store store, ICollection<int> channelIds, long from, long to)
         {
             var res = new PatternResult { From = from, To = to, Created = Clock.Now() };
@@ -228,6 +236,8 @@ namespace Hoodata
             var cnt = new Dictionary<int, int[]>();
             var constant = new Dictionary<int, bool[]>();   // all minutes in the slot had one value
             var distinct = new Dictionary<int, HashSet<double>>();
+            var minutes = new Dictionary<int, int[]>();   // minutes with data, and those with a single value
+            var extremes = new Dictionary<int, HashSet<double>>();   // every minute's lowest and highest value
             // Switches (channels with a few values, such as a pump on or off) also give events: the moments they
             // change to each value, which can come before an anomaly.
             var switches = new Dictionary<int, List<KeyValuePair<double, long>>>();
@@ -264,6 +274,8 @@ namespace Hoodata
                         for (int k = 0; k < n; k++) c[k] = true;
                         constant[ch] = c;
                         distinct[ch] = new HashSet<double>();
+                        minutes[ch] = new int[2];
+                        extremes[ch] = new HashSet<double>();
                     }
                     double mean = st.GetDouble(3), mn = st.GetDouble(4), mx = st.GetDouble(5);
                     int m = (int)st.GetLong(2);
@@ -271,7 +283,12 @@ namespace Hoodata
                     if (mn != mx) constant[ch][i] = false;
                     s[i] += mean * m;
                     cnt[ch][i] += m;
-                    if (distinct[ch].Count <= 5) distinct[ch].Add(Math.Round(mean, 6));
+                    // Only minutes with one value count: a minute in which a switch changed has a mean in between
+                    // (0.42), which would make a switch read faster than once a minute look like a measurement.
+                    if (mn == mx && distinct[ch].Count <= 5) distinct[ch].Add(Math.Round(mean, 6));
+                    minutes[ch][0]++;
+                    if (mn == mx) minutes[ch][1]++;
+                    if (extremes[ch].Count <= 5) { extremes[ch].Add(Math.Round(mn, 6)); extremes[ch].Add(Math.Round(mx, 6)); }
                 }
             }
 
@@ -336,7 +353,7 @@ namespace Hoodata
             {
                 int ch = kv.Key;
                 int[] c = cnt[ch];
-                bool discrete = distinct[ch].Count <= 4;
+                bool discrete = IsSwitch(distinct[ch], extremes[ch], minutes[ch]);
                 if (discrete)
                 {
                     foreach (double v in distinct[ch])
@@ -418,7 +435,7 @@ namespace Hoodata
             var triggers = new List<Target>(used);
             foreach (var kv in switches)
             {
-                if (!distinct.ContainsKey(kv.Key) || distinct[kv.Key].Count > 4) continue;
+                if (!distinct.ContainsKey(kv.Key) || !IsSwitch(distinct[kv.Key], extremes[kv.Key], minutes[kv.Key])) continue;
                 var byValue = new Dictionary<double, Target>();
                 foreach (var change in kv.Value)
                 {

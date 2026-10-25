@@ -201,7 +201,7 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 .status.ok { color: var(--good-text); }
 .status.warn { color: var(--warn-text); }
 .status.alert { color: var(--alert-text); }
-.status.learning, .status.idle { color: var(--ink-2); }
+.status.learning, .status.idle, .status.paused { color: var(--ink-2); }
 
 /* ---- channel cards ---- */
 
@@ -370,6 +370,8 @@ ul.rules.card li { padding: 8px 0; }
 .notice.error { color: var(--alert-text); }
 
 .locked { max-width: 520px; margin: 80px auto; text-align: center; }
+
+#store-error { max-width: 1232px; margin: 12px auto 0; }
 
 @media (max-width: 640px) {
   header { padding: 10px 16px; }

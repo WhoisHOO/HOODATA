@@ -134,7 +134,32 @@ namespace Hoodata
         DetectSettings cfg;
         public double? Lo, Hi;
         public bool Quiet;              // replaying stored values: update the state but report nothing
-        public long ResumeFloor = long.MinValue;  // gaps that start before this (HOODATA was not running) are not gaps
+
+        // When the source (re)started watching. The interval from the last value before it to the first after it is
+        // HOODATA's own downtime, not a gap; silence after it is measured from it.
+        long resumeFloor = long.MinValue;
+        bool resumePending;
+        public long ResumeFloor
+        {
+            get { return resumeFloor; }
+            set { resumeFloor = value; resumePending = value != long.MinValue; }
+        }
+
+        // When values arrived on this PC's clock. Gaps of a running source are judged on arrival, because a device's
+        // own timestamps can lag (a clock that is off) or come in batches. What is learned is the silence between
+        // arrivals; values less than 50 ms apart (one message, one poll, a quick burst) are one arrival.
+        long lastArrival, burstStart, burstFirstT, burstLastT;
+        readonly Ring arrivals = new Ring(64);
+        bool wasStream;   // has been a fast stream: its silences are outages and are not learned
+
+        // When the source (re)started being watched, on this PC's clock, folders included: silence is measured from
+        // it until something arrives, and the time before it (the source or HOODATA was stopped) is not learned.
+        long watchFrom;
+        public long WatchFrom
+        {
+            get { return watchFrom; }
+            set { watchFrom = value; lastArrival = 0; }
+        }
 
         long n, prevT = long.MinValue;
         double prevV;
@@ -183,7 +208,6 @@ namespace Hoodata
         {
             this.sink = sink;
             this.cfg = cfg;
-            for (int h = 0; h < profile.Length; h++) { profile[h] = new Ring(Blocks); profileDay[h] = new Ring(Blocks); }
         }
 
         public DetectSettings Settings { get { return cfg; } set { cfg = value; } }
@@ -238,13 +262,82 @@ namespace Hoodata
 
         // ---- live check: called about once a second for channels whose source is running ----
 
+        // A new value, dated t, arrived from a running source (called before Feed; repeated or older times do not
+        // count).
+        public void Arrived(long now, long t)
+        {
+            if (lastArrival > 0)
+            {
+                // Part of the same arrival: less than 50 ms after the last value, or a backlog read in parts, whose
+                // dates run far ahead of the clock.
+                if (now - lastArrival <= 50 || t - burstLastT > 10 * (now - lastArrival))
+                {
+                    lastArrival = now;
+                    burstLastT = t;
+                    return;
+                }
+                if (Streaming) wasStream = true;   // the silence that ends a fast stream is an outage
+                else arrivals.Add(now - lastArrival);
+            }
+            burstStart = now;
+            burstFirstT = burstLastT = t;
+            lastArrival = now;
+        }
+
+        // The source's settings changed, and how often it sends may have: what was learned of its rhythm goes.
+        public void ResetRhythm()
+        {
+            arrivals.Clear();
+            intervals.Clear();
+            interval = double.NaN;
+            wasStream = false;
+            lastArrival = 0;
+        }
+
+        // Values have kept coming less than 50 ms apart for a second or more, dated about as they came: a fast stream
+        // (not a backlog read at once). Its silences between arrivals are only its outages, so they say nothing about
+        // how often it sends.
+        bool Streaming
+        {
+            get
+            {
+                long wall = lastArrival - burstStart;
+                return lastArrival > 0 && wall >= 1000 && burstLastT - burstFirstT <= 10 * wall;
+            }
+        }
+
         public void Tick(long now)
         {
-            if (gapEv != null || prevT == long.MinValue || prevT < ResumeFloor) return;
-            double th = GapThreshold;
-            if (double.IsNaN(th) || now - prevT <= th) return;
-            gapEv = Open(Kinds.Gap, prevT, null, null, (now - prevT) / TypicalInterval,
-                "{\"interval\":" + D(TypicalInterval) + "}");
+            if (gapEv != null || prevT == long.MinValue) return;
+            // Silence counts from the last arrival, or from the (re)start when nothing has arrived since.
+            long since = Math.Max(lastArrival, watchFrom);
+            if (since <= 0) return;
+            double usual, th, ti = TypicalInterval;
+            if (Streaming || (wasStream && arrivals.Count == 0))
+            {
+                // Silent once it has stopped for the shortest gap.
+                usual = double.IsNaN(ti) ? 50 : Math.Min(ti, 50);
+                th = Math.Max(cfg.MinGapMs, cfg.GapFactor * usual);
+            }
+            else if (arrivals.Count >= 1)
+            {
+                usual = Robust.Quantile(arrivals.ToArray(), 0.9);
+                th = Math.Max(cfg.MinGapMs, cfg.GapFactor * usual);
+            }
+            else
+            {
+                // At most one arrival since the (re)start: how often the source sends (a value a second, or a batch a
+                // minute) is not known yet, so wait longer before calling it silent.
+                if (double.IsNaN(ti)) return;
+                usual = ti;
+                th = Math.Max(600000, cfg.GapFactor * usual);
+            }
+            if (now - since <= th) return;
+            // From the last value; before anything arrived since the start, from the start. A value that arrived
+            // since then is dated by the device, which can lag this PC, and the gap ends at a device time too.
+            long t0 = lastArrival > 0 ? prevT : Math.Max(prevT, resumeFloor);
+            gapEv = Open(Kinds.Gap, t0, null, null, (now - since) / Math.Max(usual, 1),
+                "{\"interval\":" + D(usual) + "}");
         }
 
         // ---- one value ----
@@ -256,8 +349,10 @@ namespace Hoodata
             double th = GapThreshold;
             bool consecutive = true;
             // The first value after HOODATA was not running: the time between says nothing about the source.
-            bool resumed = prevT != long.MinValue && prevT < ResumeFloor && t >= ResumeFloor;
+            bool resumed = resumePending && !Quiet && prevT != long.MinValue;
+            if (!Quiet) resumePending = false;
             if (resumed) consecutive = false;
+            if (resumed && gapEv != null) Close(ref gapEv, t);
             if (prevT != long.MinValue && !resumed)
             {
                 long dt = t - prevT;
@@ -265,7 +360,7 @@ namespace Hoodata
                 {
                     consecutive = false;
                     if (gapEv != null) Close(ref gapEv, t);
-                    else if (prevT >= ResumeFloor)
+                    else
                     {
                         EventRec g = Open(Kinds.Gap, prevT, null, null, dt / TypicalInterval,
                             "{\"interval\":" + D(TypicalInterval) + "}");
@@ -550,6 +645,16 @@ namespace Hoodata
             }
         }
 
+        // A noise estimate from a stored one-minute summary, when HOODATA starts.
+        public void AddNoiseEstimate(long t, double estimate, double at)
+        {
+            if (double.IsNaN(estimate) || double.IsNaN(at) || t - lastNoiseHistT < 300000) return;
+            lastNoiseHistT = t;
+            noiseHist.Add(estimate);
+            noiseLevel.Add(at);
+            usualAt = double.NaN;
+        }
+
         // The median noise of up to 32 past estimates taken near this level. Estimates from a level far away (a machine
         // that was off) do not count; with fewer than 16 near ones there is nothing to compare with yet.
         double UsualNoise(double at)
@@ -602,6 +707,8 @@ namespace Hoodata
         public void AddToProfile(long t, double mean)
         {
             int i = ProfileIndex(t);
+            // Made on first use: a channel that never runs for days does not need them.
+            if (profile[i] == null) { profile[i] = new Ring(Blocks); profileDay[i] = new Ring(Blocks); }
             profile[i].Add(mean);
             profileDay[i].Add(LocalDay(t));
         }
@@ -615,6 +722,7 @@ namespace Hoodata
             s = 0;
             int idx = ProfileIndex(t);
             Ring p = profile[idx], pd = profileDay[idx];
+            if (p == null) return false;
             double today = LocalDay(t);
             var earlier = new List<double>();
             var dayMeans = new Dictionary<double, double[]>();
@@ -647,7 +755,18 @@ namespace Hoodata
         {
             int h = ProfileIndex(t) % 24;
             double med, s;
-            if (UsualRange(t, out med, out s))
+            if (!UsualRange(t, out med, out s))
+            {
+                // No usual range for this hour (not enough earlier days of this day type): an open episode cannot
+                // be judged, so it ends after the same half hour instead of staying open.
+                if (unusualEv != null && ++unusualUnder >= 6)
+                {
+                    lastUnusual = unusualEv;
+                    Close(ref unusualEv, t);
+                    unusualOver = 0;
+                }
+            }
+            else
             {
                 double z = Math.Abs(mean - med) / s;
                 if (unusualEv == null)
@@ -695,7 +814,8 @@ namespace Hoodata
         public void Suspend()
         {
             long t = prevT == long.MinValue ? Clock.Now() : prevT;
-            Close(ref gapEv, Math.Max(t, gapEv != null ? gapEv.T0 : t));
+            // An open gap lasted until the source stopped being watched, not until the last value.
+            if (gapEv != null) Close(ref gapEv, Math.Max(gapEv.T0, Clock.Now()));
             Close(ref stuckEv, t);
             Close(ref rangeEv, t);
             Close(ref noisyEv, t);

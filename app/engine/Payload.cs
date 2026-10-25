@@ -5,6 +5,8 @@
 //   temp:23.5,hum:61   or   temp:23.5 hum:61              the Arduino Serial Plotter's format
 //   air,room=lab temp=23.5,hum=61 1792900000000000000     InfluxDB line protocol (tags join the name)
 //   23.5,61   or   23.5 61   or   23.5                    numbers alone: value1, value2, ... (or just the name given)
+//   time,temp,hum + rows                                  a small table: a header line, then rows (time column optional)
+//   {"temp":1}\n{"temp":2}                                 one JSON object per line
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -42,12 +44,66 @@ namespace Hoodata
                     return result;
                 }
             }
-            foreach (string raw in trimmed.Split('\n'))
+            string[] lines = trimmed.Split('\n');
+            if (ParseTable(lines, result)) return result;
+            foreach (string raw in lines)
             {
-                ParsedValues pv = ParseLine(raw.Trim(), name);
+                string line = raw.Trim();
+                object doc;
+                if (line.StartsWith("{") && Json.TryParse(line, out doc)) { AddJson(result, doc, name); continue; }
+                ParsedValues pv = ParseLine(line, name);
                 if (pv != null && pv.Values.Count > 0) result.Add(pv);
             }
             return result;
+        }
+
+        static readonly Regex HeaderName = new Regex(@"^[^\W\d][\w .\-/()\[\]%]*$", RegexOptions.CultureInvariant);
+
+        // A header line of names followed by rows with as many fields (what a spreadsheet exports): each row is one
+        // message, its time from a time column when there is one.
+        static bool ParseTable(string[] lines, List<ParsedValues> result)
+        {
+            if (lines.Length < 2) return false;
+            string first = lines[0].Trim();
+            char d = first.IndexOf('\t') >= 0 ? '\t' : first.IndexOf(';') >= 0 ? ';' : ',';
+            string[] head = first.Split(d);
+            if (head.Length < 2) return false;
+            foreach (string h in head) if (!HeaderName.IsMatch(h.Trim())) return false;
+            var rows = new List<string[]>();
+            for (int i = 1; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (line.Length == 0) continue;
+                string[] f = line.Split(d);
+                if (f.Length != head.Length) return false;
+                rows.Add(f);
+            }
+            if (rows.Count == 0) return false;
+            // The time column is named so and holds times in every row; a 't' with 23.5 in it is a temperature.
+            int timeCol = -1;
+            for (int c = 0; c < head.Length && timeCol < 0; c++)
+            {
+                string n = head[c].Trim();
+                if (!TimeNames.Contains(n) && !n.Equals("date", StringComparison.OrdinalIgnoreCase)) continue;
+                bool times = true;
+                foreach (string[] f in rows) { long t; if (!TryTime(f[c].Trim(), out t)) { times = false; break; } }
+                if (times) timeCol = c;
+            }
+            foreach (string[] f in rows)
+            {
+                var pv = new ParsedValues();
+                long t;
+                if (timeCol >= 0 && TryTime(f[timeCol].Trim(), out t)) pv.Time = t;
+                for (int c = 0; c < head.Length; c++)
+                {
+                    if (c == timeCol) continue;
+                    double v;
+                    string unit;
+                    if (Values.TryNumber(f[c], d != ',' && f[c].IndexOf('.') < 0, out v, out unit)) pv.Values.Add(new KeyValuePair<string, double>(head[c].Trim(), v));
+                }
+                if (pv.Values.Count > 0) result.Add(pv);
+            }
+            return true;
         }
 
         static void AddJson(List<ParsedValues> result, object doc, string name)
@@ -80,7 +136,8 @@ namespace Hoodata
             }
         }
 
-        // Seconds, milliseconds or nanoseconds since 1970, or an ISO 8601 text.
+        // Seconds, milliseconds or nanoseconds since 1970, or an ISO 8601 text. A text without a zone (Z or +09:00) is
+        // local time, as ISO 8601 says and as the CSV import reads it.
         public static bool TryTime(object o, out long ms)
         {
             ms = 0;
@@ -90,7 +147,7 @@ namespace Hoodata
             else if (o is string)
             {
                 DateTime dt;
-                if (!DateTime.TryParse((string)o, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out dt)) return false;
+                if (!DateTime.TryParse((string)o, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeLocal, out dt)) return false;
                 ms = Clock.FromUtc(DateTime.SpecifyKind(dt, DateTimeKind.Utc));
                 return true;
             }
@@ -132,7 +189,9 @@ namespace Hoodata
                 pv = new ParsedValues();
             }
 
-            // Pairs, separated by commas, semicolons, tabs or spaces.
+            // Pairs, separated by commas, semicolons, tabs or spaces. "Temperature: 23.5" and "temp = 23.5" (what
+            // many Arduino sketches print) are pairs too: the spaces around the separator go first.
+            if (line.IndexOf(':') > 0 || line.IndexOf('=') > 0) line = Regex.Replace(line, @"\s*([=:])\s*", "$1");
             string[] parts = line.Split(new[] { ',', ';', '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
             bool allPairs = parts.Length > 0;
             foreach (string part in parts) if (!Pair.IsMatch(part)) { allPairs = false; break; }
@@ -168,20 +227,28 @@ namespace Hoodata
         }
 
         // Readings for the engine: the message's time if it had one, else `now`.
+        // Rows without a time are dated now. When several such rows in one message give the same name, only the last
+        // of them is taken: they would all have the same time, and the latest reading is the one that counts. (One
+        // value per line, 'temp=23.5' then 'hum=61', keeps both.)
         public static List<Reading> ToReadings(List<ParsedValues> parsed, string prefix, long now)
         {
             var list = new List<Reading>();
-            foreach (ParsedValues pv in parsed)
+            var undated = new HashSet<string>();
+            for (int i = parsed.Count - 1; i >= 0; i--)
             {
+                ParsedValues pv = parsed[i];
                 long t = pv.Time.HasValue ? pv.Time.Value : now;
-                foreach (var kv in pv.Values)
+                for (int k = pv.Values.Count - 1; k >= 0; k--)
                 {
+                    var kv = pv.Values[k];
                     // A bare number sent to a named place (an MQTT topic, /ingest/<device>) takes that name.
                     string key = prefix == null || prefix.Length == 0 ? kv.Key : kv.Key == "value" ? prefix : prefix + "/" + kv.Key;
                     if (key.Length > 200) key = key.Substring(0, 200);
+                    if (!pv.Time.HasValue && !undated.Add(key)) continue;
                     list.Add(new Reading(key, t, kv.Value));
                 }
             }
+            list.Reverse();
             return list;
         }
     }

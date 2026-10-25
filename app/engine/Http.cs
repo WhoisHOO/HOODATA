@@ -21,6 +21,13 @@ namespace Hoodata
         byte[] body;
         public long MaxBody = 4 * 1024 * 1024;
 
+        // The body must keep coming: within 10 s of the head, plus a second for each 16 KB.
+        internal System.Diagnostics.Stopwatch Clock;
+        void CheckPace()
+        {
+            if (Clock != null && Clock.ElapsedMilliseconds > 10000 + ContentLength / 16) throw new HttpError(408, "too_slow");
+        }
+
         public string Header(string name)
         {
             string v;
@@ -60,6 +67,7 @@ namespace Hoodata
             int off = 0;
             while (off < body.Length)
             {
+                CheckPace();
                 int n = Body.Read(body, off, body.Length - off);
                 if (n <= 0) throw new IOException("The connection closed during the request body.");
                 off += n;
@@ -83,6 +91,7 @@ namespace Hoodata
             var buf = new byte[81920];
             while (BodyRead < ContentLength)
             {
+                CheckPace();
                 int n = Body.Read(buf, 0, (int)Math.Min(buf.Length, ContentLength - BodyRead));
                 if (n <= 0) throw new IOException("The connection closed during the upload.");
                 target.Write(buf, 0, n);
@@ -143,7 +152,8 @@ namespace Hoodata
         volatile bool stopping;
         int open;
         public Action<string> Log;
-        const int MaxHeaderBytes = 32 * 1024, MaxConnections = 64;
+        const int MaxHeaderBytes = 32 * 1024, MaxConnections = 64, MaxPerAddress = 16, HeadDeadlineMs = 10000;
+        readonly Dictionary<string, int> perAddress = new Dictionary<string, int>();
 
         public HttpServer(IPAddress address, int port, HttpHandler handler)
         {
@@ -174,12 +184,17 @@ namespace Hoodata
                 TcpClient client;
                 try { client = listener.AcceptTcpClient(); }
                 catch { if (stopping) return; continue; }
-                if (Interlocked.Increment(ref open) > MaxConnections)
+                // At most 16 connections from one address and 64 in all, so one device cannot take every slot.
+                string address = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
+                bool full;
+                lock (perAddress)
                 {
-                    Interlocked.Decrement(ref open);
-                    client.Close();
-                    continue;
+                    int n;
+                    perAddress.TryGetValue(address, out n);
+                    full = n >= MaxPerAddress || open >= MaxConnections;
+                    if (!full) { perAddress[address] = n + 1; open++; }
                 }
+                if (full) { client.Close(); continue; }
                 ThreadPool.QueueUserWorkItem(Serve, client);
             }
         }
@@ -190,7 +205,8 @@ namespace Hoodata
             try
             {
                 client.NoDelay = true;
-                client.ReceiveTimeout = 30000;
+                // A read that waits longer than the head's deadline ends the connection (an idle keep-alive one too).
+                client.ReceiveTimeout = HeadDeadlineMs;
                 client.SendTimeout = 30000;
                 var stream = client.GetStream();
                 // Reads go through a buffer (headers are read a byte at a time); writes go straight to the socket.
@@ -213,11 +229,13 @@ namespace Hoodata
                         res = HttpResponse.Error(500, "internal");
                     }
 
-                    if (req.BodyRead < req.ContentLength && req.ContentLength - req.BodyRead <= 1024 * 1024)
-                        try { req.CopyBodyTo(Stream.Null, null); } catch (IOException) { return; }
-                    // An unread body makes the connection unusable for the next request.
+                    // What the handler did not read (a refused request) is read past, up to 1 MB and at the same pace,
+                    // so the client gets the answer rather than a reset. An unread body ends the connection.
+                    bool drained = req.BodyRead == req.ContentLength;
+                    if (!drained && req.ContentLength - req.BodyRead <= 1024 * 1024)
+                        try { req.CopyBodyTo(Stream.Null, null); drained = true; } catch (HttpError) { } catch (IOException) { return; }
                     bool keep = req.Version == "HTTP/1.1" && !"close".Equals(req.Header("Connection"), StringComparison.OrdinalIgnoreCase)
-                        && req.BodyRead == req.ContentLength;
+                        && drained;
                     Write(stream, res, keep);
                     if (!keep) return;
                 }
@@ -225,7 +243,17 @@ namespace Hoodata
             catch { }
             finally
             {
-                Interlocked.Decrement(ref open);
+                lock (perAddress)
+                {
+                    open--;
+                    string address = null;
+                    try { address = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString(); } catch { }
+                    int n;
+                    if (address != null && perAddress.TryGetValue(address, out n))
+                    {
+                        if (n <= 1) perAddress.Remove(address); else perAddress[address] = n - 1;
+                    }
+                }
                 try { client.Close(); } catch { }
             }
         }
@@ -234,9 +262,14 @@ namespace Hoodata
         {
             var head = new MemoryStream();
             int matched = 0;
+            // The whole head must come within 10 s of its first byte: a client that trickles a byte at a time would
+            // otherwise hold its connection for days.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             while (matched < 4)
             {
+                if (head.Length > 0 && clock.ElapsedMilliseconds > HeadDeadlineMs) throw new HttpError(408, "too_slow");
                 int b = stream.ReadByte();
+                if (head.Length == 0) clock.Restart();
                 if (b < 0) { if (head.Length == 0) return null; throw new IOException("closed"); }
                 head.WriteByte((byte)b);
                 if (head.Length > MaxHeaderBytes) throw new HttpError(431, "headers_too_large");
@@ -268,6 +301,7 @@ namespace Hoodata
             if (len != null && (!long.TryParse(len, NumberStyles.None, CultureInfo.InvariantCulture, out req.ContentLength) || req.ContentLength < 0))
                 throw new HttpError(400, "bad_length");
             req.Body = stream;
+            req.Clock = System.Diagnostics.Stopwatch.StartNew();
             return req;
         }
 
@@ -275,7 +309,7 @@ namespace Hoodata
 
         static readonly Dictionary<int, string> Reasons = new Dictionary<int, string> {
             { 200, "OK" }, { 204, "No Content" }, { 303, "See Other" }, { 304, "Not Modified" }, { 400, "Bad Request" },
-            { 401, "Unauthorized" }, { 403, "Forbidden" }, { 404, "Not Found" }, { 405, "Method Not Allowed" },
+            { 401, "Unauthorized" }, { 403, "Forbidden" }, { 404, "Not Found" }, { 405, "Method Not Allowed" }, { 408, "Request Timeout" },
             { 409, "Conflict" }, { 411, "Length Required" }, { 413, "Payload Too Large" }, { 421, "Misdirected Request" },
             { 431, "Request Header Fields Too Large" }, { 500, "Internal Server Error" }, { 503, "Service Unavailable" } };
 

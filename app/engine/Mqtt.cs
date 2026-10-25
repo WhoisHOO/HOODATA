@@ -51,6 +51,8 @@ namespace Hoodata
             var b = new MemoryStream();
             WriteString(b, "MQTT");
             b.WriteByte(4);   // protocol level 3.1.1
+            // MQTT 3.1.1 allows a password only with a user name [MQTT-3.1.2-22].
+            if (string.IsNullOrEmpty(user)) password = null;
             byte flags = (byte)((clean ? 0x02 : 0) | (string.IsNullOrEmpty(user) ? 0 : 0x80) | (string.IsNullOrEmpty(password) ? 0 : 0x40));
             b.WriteByte(flags);
             b.WriteByte((byte)(keepAlive >> 8));
@@ -79,9 +81,20 @@ namespace Hoodata
             return b;
         }
 
-        // One packet: its first byte and its body.
+        public const int MaxBody = 1024 * 1024;
+
         public static byte[] Read(Stream s, out byte header)
         {
+            bool skipped;
+            return Read(s, out header, out skipped);
+        }
+
+        // One packet: its first byte and its body. Sensor messages are small: of a PUBLISH larger than MaxBody (a
+        // camera picture, a retained device list) only the topic and packet id are kept and the rest is read past,
+        // with `skipped` set; another packet that large is refused.
+        public static byte[] Read(Stream s, out byte header, out bool skipped)
+        {
+            skipped = false;
             header = (byte)ReadByteOrThrow(s);
             int length = 0, mult = 1;
             for (int i = 0; ; i++)
@@ -92,16 +105,41 @@ namespace Hoodata
                 if ((b & 0x80) == 0) break;
                 mult *= 128;
             }
-            if (length > 16 * 1024 * 1024) throw new IOException("MQTT packet too large.");
-            var body = new byte[length];
-            int off = 0;
-            while (off < length)
+            if (length > MaxBody)
             {
-                int n = s.Read(body, off, length - off);
+                if ((header & 0xF0) != Publish) throw new IOException("MQTT packet too large (over 1 MB).");
+                var start = new byte[2];
+                ReadFully(s, start, 0, 2);
+                int keep = 2 + ((start[0] << 8) | start[1]) + (((header >> 1) & 3) > 0 ? 2 : 0);
+                if (keep > length) throw new IOException("Bad MQTT packet.");
+                var head = new byte[keep];
+                head[0] = start[0];
+                head[1] = start[1];
+                ReadFully(s, head, 2, keep - 2);
+                var junk = new byte[65536];
+                for (int left = length - keep; left > 0; )
+                {
+                    int n = s.Read(junk, 0, Math.Min(left, junk.Length));
+                    if (n <= 0) throw new IOException("The broker closed the connection.");
+                    left -= n;
+                }
+                skipped = true;
+                return head;
+            }
+            var body = new byte[length];
+            ReadFully(s, body, 0, length);
+            return body;
+        }
+
+        static void ReadFully(Stream s, byte[] b, int off, int count)
+        {
+            while (count > 0)
+            {
+                int n = s.Read(b, off, count);
                 if (n <= 0) throw new IOException("The broker closed the connection.");
                 off += n;
+                count -= n;
             }
-            return body;
         }
 
         public static string ReadString(byte[] b, ref int i)
@@ -118,7 +156,7 @@ namespace Hoodata
         TcpClient client;
         Stream stream;
         readonly object writeLock = new object();
-        public long Messages;
+        public long Messages, Skipped;
 
         public MqttSource(Engine engine, SourceInfo info) : base(engine, info) { }
 
@@ -175,9 +213,10 @@ namespace Hoodata
                 {
                     while (!Stopping)
                     {
-                        body = MqttPacket.Read(s, out h);
+                        bool skipped;
+                        body = MqttPacket.Read(s, out h, out skipped);
                         int type = h & 0xF0;
-                        if (type == MqttPacket.Publish) OnPublish(h, body, keepRetained);
+                        if (type == MqttPacket.Publish) OnPublish(h, body, keepRetained, skipped);
                         else if (type == (MqttPacket.Pubrel & 0xF0) && body.Length >= 2) Write(MqttPacket.BuildAck(MqttPacket.Pubcomp, (body[0] << 8) | body[1]));
                         else if (type == MqttPacket.Suback)
                         {
@@ -195,7 +234,7 @@ namespace Hoodata
             }
         }
 
-        void OnPublish(byte h, byte[] body, bool keepRetained)
+        void OnPublish(byte h, byte[] body, bool keepRetained, bool skipped)
         {
             int q = (h >> 1) & 3, i = 0;
             bool retained = (h & 1) != 0;
@@ -204,6 +243,12 @@ namespace Hoodata
             if (q > 0) { packetId = (body[i] << 8) | body[i + 1]; i += 2; }
             if (q == 1) Write(MqttPacket.BuildAck(MqttPacket.Puback, packetId));
             if (q == 2) Write(MqttPacket.BuildAck(MqttPacket.Pubrec, packetId));
+            if (skipped)
+            {
+                Interlocked.Increment(ref Skipped);
+                if (!retained || keepRetained) error = "mqtt_skipped_large: " + topic;
+                return;
+            }
             if (retained && !keepRetained) return;
             string text = Encoding.UTF8.GetString(body, i, body.Length - i);
             List<Reading> readings = Payload.ToReadings(Payload.Parse(text, null), topic, Clock.Now());

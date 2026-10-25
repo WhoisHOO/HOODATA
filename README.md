@@ -6,18 +6,17 @@ situations they happen in.**
 Windows 10/11 · nothing to install · everything stays on your PC · [Apache License 2.0](./LICENSE) ·
 [한국어](./README.ko.md)
 
-> **In development.** There is no release yet; the version on `main` works and is tested. The plan and progress are
-> in [docs/ROADMAP.md](docs/ROADMAP.md) (Korean); how anomalies and patterns are found, and how well, is in
-> [docs/METHODS.md](docs/METHODS.md).
+How anomalies and patterns are found, and how well, is in [docs/METHODS.md](docs/METHODS.md); the plan and
+progress are in [docs/ROADMAP.md](docs/ROADMAP.md) (Korean).
 
-<p align="center"><img src="docs/screenshot-overview-en.png" alt="The HOODATA dashboard: a tile per channel with its value, status and last hour" width="820" /></p>
+<p align="center"><img src="docs/screenshot-overview-en.png" alt="The HOODATA dashboard: a tile per channel with its value, status and recent values" width="820" /></p>
 
 ## What it does
 
 - **Collects** from this PC (CPU, memory, disk, network, battery), CSV and Excel files, folders a data logger writes
   to, devices that send over HTTP, MQTT brokers, Modbus TCP devices and serial ports (Arduino text lines, RS-485
   Modbus RTU).
-- **Shows** a live dashboard: the current value, status and last hour of every channel; a graph of any period with
+- **Shows** a live dashboard: the current value, status and recent values of every channel; a graph of any period with
   zoom, the noise level, and statistics; every graph also as a table.
 - **Records noise and anomalies** in seven kinds: gaps, spikes, level changes, stuck values, values out of the
   limits you set, rising noise, and levels unusual for the time of day. Each comes with the numbers behind it, such
@@ -34,29 +33,38 @@ will build on it.
 
 ## Start
 
-1. Click **Code → Download ZIP**. Before extracting it, right-click the ZIP, choose **Properties**, tick
-   **Unblock** and click **OK** (with Smart App Control on, Windows otherwise blocks `start.bat`).
-2. Extract it anywhere and double-click **`start.bat`**. A small HOODATA window opens, and the dashboard opens in
-   your browser. This PC's own values appear within seconds.
+1. Under [Releases](https://github.com/WhoisHOO/HOODATA/releases), download **Source code (zip)**. Before
+   extracting it, right-click the ZIP, choose **Properties**, tick **Unblock** and click **OK** (with Smart App
+   Control on, Windows otherwise blocks `start.bat`).
+2. Extract it in one of your own folders (Downloads, Documents, Desktop; a folder right under `C:\` can be changed
+   by other users of the PC) and double-click **`start.bat`**. A small HOODATA window opens, and the dashboard opens
+   in your browser. This PC's own values appear within seconds.
 3. Add your data under **Data sources**: drop a CSV or Excel file, or add a device.
 
 HOODATA collects while its window is open; minimised is fine, closing stops it. The data stays in the `data` folder
-next to `start.bat` (or in `%LOCALAPPDATA%\HOODATA` when that folder cannot be written). Delete the folder to start
-over, or the whole HOODATA folder to remove it.
+next to `start.bat`, made private to your Windows account; the window shows which folder it uses. When that folder
+cannot be written (Program Files, or a folder Controlled Folder Access protects) or belongs to another account, the
+data goes to `%LOCALAPPDATA%\HOODATA\data` instead. A `data` folder you copied or restored is used again.
+
+To start over, delete the data folder. To remove HOODATA, delete its folder and, if they exist,
+`%LOCALAPPDATA%\HOODATA` and `C:\ProgramData\HOODATA-temp-...` (made only when your user name is not in English
+letters, for the compiler's temporary files).
 
 ## Connecting data
 
 | Source | How |
 |---|---|
-| CSV or Excel file | Drop it on the dashboard. The encoding (UTF-8 or the Windows code page, Korean included), delimiter, header row, time column (also Korean AM/PM, separate date and time columns, seconds since 1970) and units in the header such as `Temp (°C)` are recognised; you can change the choices before importing. |
+| CSV or Excel file | Drop it on the dashboard. The encoding (UTF-8, Korean CP949 or this PC's own code page), delimiter, decimal commas, header row, time column (also Korean AM/PM, separate date and time columns, seconds since 1970) and units in the header such as `Temp (°C)` are recognised. Before importing you choose the value columns, the time column, the time zone, and the interval for a file without times. Excel files must be `.xlsx` (the old `.xls` is not read); the first sheet is used. |
 | Folder | A folder a data logger keeps writing CSV files into. New files and new lines are read every two seconds, and after a restart HOODATA continues where it stopped. |
 | HTTP | Devices on your network or programs on this PC send to `http://<this PC>:47110/ingest` with the source's key. The dashboard shows the address, the key and examples for `curl` and the ESP32. |
 | MQTT | Subscribes to topics on a broker (TLS and a user name and password if needed). Each topic is a channel; each field of a JSON message is one too. |
 | Modbus TCP | Reads a PLC or a meter at a fixed interval by a register table: area, address, 16- or 32-bit integer or float, word order, scale. |
 | Serial | Text lines such as `temp:23.5,hum:61` (what an Arduino prints for the Serial Plotter), or Modbus RTU over RS-485. |
 
-Whatever the input, a message can be JSON (`{"temp":23.5,"hum":61}`, nested too, with an optional `ts`),
-`name=value` pairs, `name:value` pairs, InfluxDB line protocol, or plain numbers.
+Whatever the input, a message can be JSON (`{"temp":23.5,"hum":61}`, nested too, with an optional `ts`; also one
+object per line), `name=value` or `name: value` pairs, InfluxDB line protocol, or plain numbers; over HTTP and MQTT
+also a CSV with a header line. A `ts` without a zone is local time. A message without times is dated when it
+arrives; of several rows in it without a time, only the last is taken.
 
 An ESP32 sending over HTTP:
 
@@ -95,11 +103,14 @@ All of this is measured on one Windows 11 laptop and described in [docs/METHODS.
 ## Privacy and security
 
 - Everything stays on this PC. Nothing is sent anywhere, and nothing is downloaded.
-- The dashboard listens on `127.0.0.1` only. It opens with a key that the HOODATA window gives the browser (a
-  `HttpOnly`, `SameSite=Strict` cookie); requests that name another host are refused, so another web site cannot reach
-  it through a trick DNS name, and changes need a header a web page from elsewhere cannot send.
+- The dashboard listens on `127.0.0.1` only. It opens with a token that the HOODATA window gives the browser, made
+  anew at each start (an `HttpOnly`, `SameSite=Strict` cookie); requests that name another host are refused, so
+  another web site cannot reach it through a trick DNS name, and changes need a header a web page from elsewhere
+  cannot send.
 - The HTTP receiver has its own port and key, and listens beyond this PC only when you allow it. Windows Firewall
-  may then ask whether PowerShell may accept connections.
+  may then ask whether PowerShell may accept connections. A request's headers must arrive within 10 seconds and its
+  body at a steady pace, one address may hold 16 connections, and a source may make at most 1000 channels, so one
+  device cannot block or flood HOODATA.
 - An MQTT password is stored encrypted for your Windows account (DPAPI) and never shown again.
 
 ## Development

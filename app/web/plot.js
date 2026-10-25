@@ -9,12 +9,22 @@
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   };
 
-  // Numbers: enough decimals for the size of the value, no more.
-  HD.fmt = function (v, lang) {
+  // Numbers: about six significant digits (1,013.25 hPa, 101.284 kPa, 23.5), at most four decimals.
+  HD.fmt = function (v, lang, decimals) {
     if (v === null || v === undefined || !isFinite(v)) return '–';
     const a = Math.abs(v);
-    const d = a >= 1000 ? 0 : a >= 100 ? 1 : a >= 10 ? 2 : a >= 1 ? 2 : a >= 0.01 ? 3 : a === 0 ? 0 : 4;
-    return new Intl.NumberFormat(lang === 'ko' ? 'ko-KR' : 'en-US', { maximumFractionDigits: d }).format(v);
+    const whole = a >= 1 ? Math.floor(Math.log10(a)) + 1 : 1;
+    const d = decimals !== undefined ? decimals : Math.max(0, Math.min(4, 6 - whole));
+    return new Intl.NumberFormat(lang === 'ko' ? 'ko-KR' : 'en-US',
+      decimals !== undefined ? { minimumFractionDigits: d, maximumFractionDigits: d } : { maximumFractionDigits: d }).format(v);
+  };
+
+  // Axis ticks: as many decimals as the step between ticks needs, the same for every tick.
+  HD.tickDecimals = function (step) {
+    if (!(step > 0)) return 0;
+    let d = Math.max(0, -Math.floor(Math.log10(step) + 1e-9));
+    if (Math.abs(step * Math.pow(10, d) - Math.round(step * Math.pow(10, d))) > 1e-6) d++;
+    return Math.min(d, 6);
   };
 
   const pad2 = n => (n < 10 ? '0' : '') + n;
@@ -145,11 +155,12 @@
         for (let v = Math.ceil(min / step) * step; v <= max + step * 1e-9; v += step) yTicks.push(Math.abs(v) < step * 1e-9 ? 0 : v);
       }
       let left = 2;
-      if (!spark) for (const v of yTicks) left = Math.max(left, ctx.measureText(HD.fmt(v, this.o.lang)).width + 12);
+      const tickDec = HD.tickDecimals(step);
+      if (!spark) for (const v of yTicks) left = Math.max(left, ctx.measureText(HD.fmt(v, this.o.lang, tickDec)).width + 12);
       const m = spark ? { l: 2, r: 6, t: 6, b: 4 } : { l: Math.ceil(left), r: 14, t: 12, b: 24 };
       const from = d ? d.from : 0, to = d ? d.to : 1;
       return {
-        w, h, m, min, max, from, to, yTicks,
+        w, h, m, min, max, from, to, yTicks, tickDec,
         x: t => m.l + (t - from) / (to - from) * (w - m.l - m.r),
         y: v => m.t + (1 - (v - min) / (max - min)) * (h - m.t - m.b),
         t: x => from + (x - m.l) / (w - m.l - m.r) * (to - from)
@@ -188,7 +199,7 @@
         for (const v of L.yTicks) {
           const y = Math.round(L.y(v)) + 0.5;
           ctx.beginPath(); ctx.moveTo(L.m.l, y); ctx.lineTo(w - L.m.r, y); ctx.stroke();
-          ctx.fillText(HD.fmt(v, this.o.lang), L.m.l - 8, y);
+          ctx.fillText(HD.fmt(v, this.o.lang, L.tickDec), L.m.l - 8, y);
         }
         ctx.strokeStyle = c.axis;
         ctx.beginPath(); ctx.moveTo(L.m.l, h - L.m.b + 0.5); ctx.lineTo(w - L.m.r, h - L.m.b + 0.5); ctx.stroke();

@@ -67,7 +67,7 @@ namespace Hoodata
         readonly string path;
         readonly SqliteDb w;
         readonly Stack<SqliteDb> readers = new Stack<SqliteDb>();
-        SqliteStmt insSample, insMinute;
+        SqliteStmt insSample, insMinute, selMinute;
 
         public Store(string path)
         {
@@ -82,9 +82,9 @@ namespace Hoodata
             if (version > SchemaVersion)
                 throw new InvalidOperationException("The data folder was written by a newer HOODATA (schema " + version + ").");
             w.Exec(@"
-CREATE TABLE IF NOT EXISTS source(id INTEGER PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS source(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL,
   config TEXT NOT NULL DEFAULT '{}', enabled INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS channel(id INTEGER PRIMARY KEY, source INTEGER NOT NULL, key TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS channel(id INTEGER PRIMARY KEY AUTOINCREMENT, source INTEGER NOT NULL, key TEXT NOT NULL,
   name TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', lo REAL, hi REAL, hidden INTEGER NOT NULL DEFAULT 0,
   created INTEGER NOT NULL, UNIQUE(source, key));
 CREATE TABLE IF NOT EXISTS sample(ch INTEGER NOT NULL, t INTEGER NOT NULL, v REAL NOT NULL,
@@ -92,15 +92,18 @@ CREATE TABLE IF NOT EXISTS sample(ch INTEGER NOT NULL, t INTEGER NOT NULL, v REA
 CREATE TABLE IF NOT EXISTS minute(ch INTEGER NOT NULL, t INTEGER NOT NULL, n INTEGER NOT NULL,
   mn REAL NOT NULL, mx REAL NOT NULL, mean REAL NOT NULL, sd REAL NOT NULL, noise REAL,
   PRIMARY KEY(ch, t)) WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS event(id INTEGER PRIMARY KEY, ch INTEGER NOT NULL, kind TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS event(id INTEGER PRIMARY KEY AUTOINCREMENT, ch INTEGER NOT NULL, kind TEXT NOT NULL,
   t0 INTEGER NOT NULL, t1 INTEGER, value REAL, expected REAL, score REAL, detail TEXT NOT NULL DEFAULT '{}',
   ack INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS event_t0 ON event(t0);
 CREATE INDEX IF NOT EXISTS event_ch ON event(ch, t0);
 ");
             SetMeta("schema", SchemaVersion.ToString());
+            // Read positions of folder sources deleted by an earlier version, which left them behind.
+            w.Exec("DELETE FROM meta WHERE k LIKE 'folder:%' AND CAST(substr(k, 8) AS INTEGER) NOT IN (SELECT id FROM source)");
             insSample = w.Prepare("INSERT OR REPLACE INTO sample(ch, t, v) VALUES(?1, ?2, ?3)");
             insMinute = w.Prepare("INSERT OR REPLACE INTO minute(ch, t, n, mn, mx, mean, sd, noise) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)");
+            selMinute = w.Prepare("SELECT n, mn, mx, mean, sd, noise FROM minute WHERE ch = ?1 AND t = ?2");
         }
 
         public string DbPath { get { return path; } }
@@ -203,12 +206,21 @@ CREATE INDEX IF NOT EXISTS event_ch ON event(ch, t0);
                         "DELETE FROM minute WHERE ch IN (SELECT id FROM channel WHERE source = ?1)",
                         "DELETE FROM event WHERE ch IN (SELECT id FROM channel WHERE source = ?1)",
                         "DELETE FROM channel WHERE source = ?1",
-                        "DELETE FROM source WHERE id = ?1" })
+                        "DELETE FROM source WHERE id = ?1",
+                        // What a folder source remembered about its files.
+                        "DELETE FROM meta WHERE k = 'folder:' || ?1" })
                         using (var st = w.Prepare(sql)) st.Bind(1, id).Run();
                     w.Exec("COMMIT");
                 }
-                catch { w.Exec("ROLLBACK"); throw; }
+                catch { Rollback(); throw; }
             }
+        }
+
+        // A failed statement can have rolled the transaction back already (a full disk does); then ROLLBACK itself
+        // fails, and that error must not hide the first one.
+        void Rollback()
+        {
+            try { w.Exec("ROLLBACK"); } catch (SqliteException) { }
         }
 
         // ---- channels ----
@@ -259,7 +271,8 @@ CREATE INDEX IF NOT EXISTS event_ch ON event(ch, t0);
 
         // ---- values ----
 
-        // Writes one batch in a single transaction.
+        // Writes one batch in a single transaction. A minute that already has a row (its first part was written
+        // before a source was paused, edited or HOODATA restarted) is merged with it, not replaced.
         public void Write(List<Sample> samples, List<MinuteRow> minutes)
         {
             if (samples.Count == 0 && minutes.Count == 0) return;
@@ -275,14 +288,48 @@ CREATE INDEX IF NOT EXISTS event_ch ON event(ch, t0);
                     }
                     foreach (MinuteRow m in minutes)
                     {
-                        insMinute.Bind(1, m.Ch).Bind(2, m.T).Bind(3, m.N).Bind(4, m.Min).Bind(5, m.Max)
-                            .Bind(6, m.Mean).Bind(7, m.Sd).Bind(8, m.Noise);
+                        MinuteRow row = Merge(m);
+                        if (row == null) continue;
+                        insMinute.Bind(1, row.Ch).Bind(2, row.T).Bind(3, row.N).Bind(4, row.Min).Bind(5, row.Max)
+                            .Bind(6, row.Mean).Bind(7, row.Sd).Bind(8, row.Noise);
                         insMinute.Run();
                     }
                     w.Exec("COMMIT");
                 }
-                catch { w.Exec("ROLLBACK"); throw; }
+                catch
+                {
+                    insSample.Reset();
+                    insMinute.Reset();
+                    selMinute.Reset();
+                    Rollback();
+                    throw;
+                }
             }
+        }
+
+        // The stored part of the minute and the new part, combined (counts, extremes, mean, pooled deviation). Null
+        // when the two cannot be combined (values near the ends of the double range): the stored part stays.
+        MinuteRow Merge(MinuteRow m)
+        {
+            selMinute.Bind(1, m.Ch).Bind(2, m.T);
+            try
+            {
+                if (!selMinute.Step()) return m;
+                double n1 = selMinute.GetLong(0), n2 = m.N, n = n1 + n2;
+                double m1 = selMinute.GetDouble(3), m2 = m.Mean, mean = m1 + (m2 - m1) * (n2 / n);
+                if (double.IsNaN(mean) || double.IsInfinity(mean)) return null;
+                double s1 = selMinute.GetDouble(4), s2 = m.Sd;
+                double ss = (n1 - 1) * s1 * s1 + (n2 - 1) * s2 * s2 + n1 * n2 / n * (m1 - m2) * (m1 - m2);
+                double sd = n > 1 ? Math.Sqrt(Math.Max(0, ss / (n - 1))) : 0;
+                return new MinuteRow
+                {
+                    Ch = m.Ch, T = m.T, N = (int)n,
+                    Min = Math.Min(selMinute.GetDouble(1), m.Min), Max = Math.Max(selMinute.GetDouble(2), m.Max),
+                    Mean = mean, Sd = double.IsNaN(sd) || double.IsInfinity(sd) ? 0 : sd,
+                    Noise = m.Noise ?? selMinute.GetDoubleOrNull(5)
+                };
+            }
+            finally { selMinute.Reset(); }
         }
 
         // Raw values older than the cutoff go; the one-minute summaries and the anomalies stay.
@@ -340,6 +387,7 @@ CREATE INDEX IF NOT EXISTS event_ch ON event(ch, t0);
             {
                 if (insSample != null) { insSample.Dispose(); insSample = null; }
                 if (insMinute != null) { insMinute.Dispose(); insMinute = null; }
+                if (selMinute != null) { selMinute.Dispose(); selMinute = null; }
                 w.Dispose();
             }
             lock (readers) while (readers.Count > 0) readers.Pop().Dispose();

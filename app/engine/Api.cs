@@ -1,5 +1,6 @@
 // The dashboard's API and files. Only this PC can connect (the server listens on 127.0.0.1), and only a browser that
-// was given the key: the HOODATA window opens /open?key=..., which sets it as a SameSite=Strict cookie.
+// was given the key: the HOODATA window opens /open?key=..., which sets a SameSite=Strict cookie. The cookie holds a
+// token made at this start, not the key, under a name of its own for each data folder.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -11,7 +12,6 @@ namespace Hoodata
     public sealed class Api
     {
         readonly Engine e;
-        const string Cookie = "hoodata_key";
         static readonly Dictionary<string, string> Files = new Dictionary<string, string> {
             { "/", "index.html" }, { "/index.html", "index.html" }, { "/app.js", "app.js" }, { "/plot.js", "plot.js" },
             { "/style.css", "style.css" }, { "/favicon.svg", "favicon.svg" } };
@@ -41,7 +41,7 @@ namespace Hoodata
             {
                 if (!SameKey(req.Arg("key", null), e.Key)) return HttpResponse.Error(403, "wrong_key");
                 HttpResponse r = HttpResponse.Redirect("/");
-                r.Headers["Set-Cookie"] = Cookie + "=" + e.Key + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000";
+                r.Headers["Set-Cookie"] = e.CookieName + "=" + e.Session + "; Path=/; HttpOnly; SameSite=Strict";
                 return r;
             }
 
@@ -50,7 +50,7 @@ namespace Hoodata
             if (req.Method == "GET" && req.Path == "/strings.json") return Static(Path.Combine(e.AppDir, "strings.json"));
 
             if (!req.Path.StartsWith("/api/")) return HttpResponse.Error(404, "not_found");
-            if (!SameKey(req.Cookie(Cookie), e.Key)) return HttpResponse.Error(401, "no_key");
+            if (!SameKey(req.Cookie(e.CookieName), e.Session)) return HttpResponse.Error(401, "no_key");
             if (req.Method != "GET")
             {
                 // The page sends this header; a form or a plain cross-site request cannot.
@@ -132,7 +132,8 @@ namespace Hoodata
         {
             var w = new JsonWriter().Obj().Prop("version", Engine.Version).Prop("lang", e.Lang)
                 .Prop("sensitivity", e.Settings.Sensitivity).Prop("retention_days", e.RetentionDays).Prop("port", e.Port)
-                .Prop("data_dir", e.DataDir).Prop("sqlite", SqliteDb.Version).Prop("started", e.StartedAt).EndObj();
+                .Prop("data_dir", e.DataDir).Prop("sqlite", SqliteDb.Version).Prop("started", e.StartedAt)
+                .Key("store_error").Str(e.StoreError).EndObj();
             return HttpResponse.Json(w);
         }
 
@@ -152,7 +153,7 @@ namespace Hoodata
         HttpResponse Live(long since)
         {
             long now = Clock.Now();
-            var w = new JsonWriter().Obj().Prop("seq", e.Seq).Prop("now", now);
+            var w = new JsonWriter().Obj().Prop("seq", e.Seq).Prop("now", now).Key("store_error").Str(e.StoreError);
             w.Key("channels").Arr();
             lock (e.Gate)
                 foreach (Channel ch in e.Channels())
@@ -496,7 +497,8 @@ namespace Hoodata
                 c["has_password"] = c.Remove("password_enc");
                 w.Obj().Prop("id", s.Info.Id).Prop("kind", s.Info.Kind).Prop("name", s.Info.Name).Key("config").Raw(Serialize(c))
                     .Prop("enabled", s.Info.Enabled).Prop("created", s.Info.Created)
-                    .Prop("state", s.Impl != null ? s.Impl.State : "stopped").Key("error").Str(s.Impl != null ? s.Impl.Error : null).EndObj();
+                    .Prop("state", s.Impl != null ? s.Impl.State : "stopped")
+                    .Key("error").Str(s.Impl != null && s.Impl.Error != null ? s.Impl.Error : s.Warning).EndObj();
             }
             w.EndArr();
         }
@@ -516,9 +518,10 @@ namespace Hoodata
             cfg = cfg ?? new Dictionary<string, object>();
             if (kind == "mqtt")
             {
+                if (Json.Str(cfg, "user", "").Trim().Length == 0) cfg["clear_password"] = true;   // no password without a user
                 string pw = Json.Str(cfg, "password", "");
                 cfg.Remove("password");
-                if (pw.Length > 0) cfg["password_enc"] = Secrets.Protect(pw);
+                if (pw.Length > 0 && !Json.Bool(cfg, "clear_password", false)) cfg["password_enc"] = Secrets.Protect(pw);
                 else if (Json.Bool(cfg, "clear_password", false)) cfg.Remove("password_enc");
                 else if (old != null && old.ContainsKey("password_enc")) cfg["password_enc"] = old["password_enc"];
                 cfg.Remove("clear_password");
@@ -593,11 +596,17 @@ namespace Hoodata
             try
             {
                 using (var fs = File.Create(path)) req.CopyBodyTo(fs, null);
-                if (name.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+                byte[] magic = new byte[8];
+                using (var fs = File.OpenRead(path)) fs.Read(magic, 0, 8);
+                // An Excel 97-2003 workbook (.xls) is a binary format HOODATA does not read.
+                if (magic[0] == 0xD0 && magic[1] == 0xCF && magic[2] == 0x11 && magic[3] == 0xE0) throw new HttpError(400, "xls_not_supported");
+                bool zip = magic[0] == (byte)'P' && magic[1] == (byte)'K' && magic[2] == 3 && magic[3] == 4;
+                if (name.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) || zip)
                 {
                     // Excel: the first worksheet becomes a CSV, imported like one.
                     string csv = path + ".csv";
                     try { Xlsx.ToCsv(path, csv); }
+                    catch { TryDelete(csv); throw; }
                     finally { TryDelete(path); }
                     path = csv;
                 }
@@ -648,7 +657,7 @@ namespace Hoodata
             string zone = Json.Str(body, "zone", "local");
             job.Zone = zone == "utc" ? TimeZoneInfo.Utc : TimeZoneInfo.Local;
             job.IntervalSeconds = Math.Max(0.001, Json.Num(body, "interval", job.IntervalSeconds));
-            job.StartMs = (long)Json.Num(body, "start", job.StartMs);
+            if (body.ContainsKey("start")) { job.StartMs = (long)Json.Num(body, "start", job.StartMs); job.StartGiven = true; }
             job.Columns.Remove(job.Layout.TimeColumn);
             job.Columns.Remove(job.Layout.ClockColumn);
             if (job.Columns.Count == 0) return HttpResponse.Error(400, "no_columns");
@@ -698,17 +707,19 @@ namespace Hoodata
             long to = (long)Json.Num(body, "to", Clock.Now());
             long from = (long)Json.Num(body, "from", to - 30L * 86400000);
             // Cut the period to where there is data, so "all" does not start in 1970.
+            bool any = false;
             using (var rd = e.Store.Read())
             using (var st = rd.Db.Prepare("SELECT min(t), max(t) FROM minute"))
             {
                 st.Step();
                 if (!st.IsNull(0))
                 {
+                    any = true;
                     from = Math.Max(from, st.GetLong(0));
                     to = Math.Min(to, st.GetLong(1) + 60000);
                 }
             }
-            if (to <= from) return HttpResponse.Error(400, "bad_range");
+            if (!any || to <= from) return HttpResponse.Error(400, "no_data_in_period");
             bool started = e.StartPatterns(from, to);
             return HttpResponse.Json(new JsonWriter().Obj().Prop("started", started).EndObj());
         }

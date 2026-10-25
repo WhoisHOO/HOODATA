@@ -42,6 +42,14 @@
 
   const withUnit = (v, unit) => fmt(v) + (unit ? ' ' + unit : '');
 
+  // An error from the API as text: its translation when there is one, else a general message with the code.
+  function errText(e) {
+    const code = (e && e.message) || String(e);
+    const key = 'Err_' + code.split(':')[0];
+    if (T(key) !== key) return T(key);
+    return F('ErrGeneric', code);
+  }
+
   // ---- DOM ----
 
   function h(tag, attrs, ...kids) {
@@ -69,6 +77,8 @@
     alert: [['circle', { cx: 8, cy: 8, r: 7, fill: 'currentColor' }],
       ['path', { d: 'M5.5 5.5l5 5M10.5 5.5l-5 5', stroke: 'var(--surface)', 'stroke-width': 1.8, 'stroke-linecap': 'round' }]],
     learning: [['circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-dasharray': '2.5 2' }]],
+    paused: [['circle', { cx: 8, cy: 8, r: 6.5, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6 }],
+      ['path', { d: 'M6.3 5.3v5.4M9.7 5.3v5.4', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round' }]],
     idle: [['rect', { x: 2.5, y: 2.5, width: 11, height: 11, rx: 2, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.6 }],
       ['path', { d: 'M5 6h6M5 8.5h6M5 11h4', stroke: 'currentColor', 'stroke-width': 1.4 }]]
   };
@@ -139,6 +149,11 @@
 
   function mergeLive(data) {
     S.seq = data.seq;
+    const banner = document.getElementById('store-error');
+    if (banner) {
+      banner.textContent = data.store_error ? F('StoreError', data.store_error) : '';
+      banner.classList.toggle('hidden', !data.store_error);
+    }
     const seen = new Set();
     for (const c of data.channels) {
       seen.add(c.id);
@@ -176,7 +191,12 @@
     document.getElementById('conn-text').textContent = T(on ? 'Connected' : 'Disconnected');
   }
 
-  const channelStatus = ch => (ch.live ? ch.status : (ch.open && ch.open.length ? ch.status : 'idle'));
+  // A channel that is not live is either imported or belongs to a paused source.
+  function channelStatus(ch) {
+    if (ch.live || (ch.open && ch.open.length)) return ch.status;
+    const src = S.sources.find(s => s.id === ch.source);
+    return src && src.kind !== 'file' ? 'paused' : 'idle';
+  }
   const sourceOf = ch => S.sources.find(s => s.id === ch.source);
 
   function sortedChannels() {
@@ -227,9 +247,9 @@
       this.body.textContent = '';
       for (const t of this.tiles.values()) t.plot.destroy();
       this.tiles.clear();
-      const chans = sortedChannels().filter(c => !c.hidden);
+      const chans = sortedChannels().filter(c => !c.hidden || S.showHidden);
       this.count = S.channels.size;
-      if (!chans.length) {
+      if (!S.channels.size) {
         this.body.appendChild(h('div', { class: 'empty' },
           h('p', { text: T('EmptyText') }),
           h('a', { class: 'btn primary', href: '#/sources', text: T('EmptyAction') })));
@@ -244,8 +264,10 @@
         for (const ch of list) grid.appendChild(this.tile(ch));
         this.body.appendChild(h('section', {}, title, grid));
       }
-      const hidden = S.channels.size - chans.length;
-      if (hidden > 0) this.body.appendChild(h('p', { class: 'muted small', text: F('HiddenChannels', hidden) }));
+      const hidden = sortedChannels().filter(c => c.hidden).length;
+      if (hidden > 0)
+        this.body.appendChild(h('p', { class: 'muted small' }, (S.showHidden ? T('ShowingHidden') : F('HiddenChannels', hidden)) + ' ',
+          h('button', { class: 'btn', type: 'button', text: T(S.showHidden ? 'HideHidden' : 'ShowHidden'), onclick: () => { S.showHidden = !S.showHidden; this.build(); } })));
     },
     tile(ch) {
       const value = h('div', { class: 'value' });
@@ -281,7 +303,7 @@
       }
     },
     onLive() {
-      const visible = sortedChannels().filter(c => !c.hidden);
+      const visible = sortedChannels().filter(c => !c.hidden || S.showHidden);
       if (visible.length !== this.tiles.size || S.channels.size !== this.count || visible.some(c => !this.tiles.has(c.id))) { this.build(); return; }
       for (const ch of visible) this.updateTile(ch);
     },
@@ -479,7 +501,7 @@
           await poll();
           this.updateHead();
           this.load(true);
-        } catch (e) { msg.textContent = T('Err_' + e.message) !== 'Err_' + e.message ? T('Err_' + e.message) : e.message; }
+        } catch (e) { msg.textContent = errText(e); }
       };
       return h('section', {}, h('h2', { text: T('ChannelSettings') }),
         h('div', { class: 'card' },
@@ -613,12 +635,20 @@
     async run() {
       const now = Date.now();
       const span = RANGES.find(r => r[0] === this.range)[1];
-      await api('/api/patterns/run', { method: 'POST', body: { from: span ? now - span : 0, to: now } });
+      try {
+        await api('/api/patterns/run', { method: 'POST', body: { from: span ? now - span : 0, to: now } });
+      } catch (e) {
+        if (e.message === 'locked') return;
+        this.status.textContent = errText(e);
+        this.body.textContent = '';
+        return;
+      }
       this.load(false);
     },
     async load(first) {
       clearTimeout(this.timer);
-      const data = await api('/api/patterns');
+      let data;
+      try { data = await api('/api/patterns'); } catch (e) { if (e.message !== 'locked') this.status.textContent = errText(e); return; }
       this.runBtn.disabled = data.running;
       if (data.running) {
         this.status.textContent = T('Analyzing');
@@ -874,7 +904,7 @@
           await poll();
           this.build();
         } catch (e) {
-          msg.textContent = T('Err_' + e.message) !== 'Err_' + e.message ? T('Err_' + e.message) : e.message;
+          msg.textContent = errText(e);
           msg.classList.remove('hidden');
         }
       };
@@ -903,10 +933,16 @@
           unit: h('input', { type: 'text', value: r.unit || '', size: 5 })
         };
         const tr = h('tr', {}, Object.values(cells).map(c => h('td', {}, c)),
-          h('td', {}, h('button', { class: 'btn danger', type: 'button', text: T('Remove'), onclick: () => tr.remove() })));
+          h('td', {}, h('button', { class: 'btn danger', type: 'button', text: T('Remove'), onclick: () => { tr.remove(); renumber(); } })));
         tr.cells_ = cells;
         body.appendChild(tr);
+        renumber();
       };
+      // Each control is named for a screen reader: the column and the register's row, renumbered when rows change.
+      const renumber = () => [...body.children].forEach((tr, i) => {
+        for (const [k, c] of Object.entries(tr.cells_)) c.setAttribute('aria-label', T('F_reg_' + k) + ', ' + F('RegisterRow', i + 1));
+        tr.lastChild.firstChild.setAttribute('aria-label', T('Remove') + ', ' + F('RegisterRow', i + 1));
+      });
       for (const r of list) addRow(r);
       if (!list.length) addRow({ name: 'value1' });
       const head = h('tr', {}, ['F_reg_name', 'F_reg_fn', 'F_reg_address', 'F_reg_type', 'F_reg_order', 'F_reg_scale', 'F_reg_unit'].map(k => h('th', { text: T(k) })), h('th'));
@@ -966,11 +1002,40 @@
       }
       return '';
     },
-    sig() { return JSON.stringify(S.sources.map(s => [s.id, s.name, s.enabled, s.state, s.error, s.config])); },
+    // What needs the cards rebuilt; a state or error change is updated in place (a retrying source flips them often).
+    sig() { return JSON.stringify(S.sources.map(s => [s.id, s.name, s.enabled, s.config, this.channelsOf(s).length])); },
+    channelsOf(s) { return sortedChannels().filter(c => c.source === s.id); },
+    // A source's error: a code with a text ('future_times', or 'mqtt_skipped_large: <topic>'), or the engine's own
+    // words.
+    errorText(s) {
+      if (!s.error) return '';
+      const cut = s.error.indexOf(': '), code = cut > 0 ? s.error.slice(0, cut) : s.error;
+      const key = 'Err_' + code;
+      return T(key) !== key ? F(key, cut > 0 ? s.error.slice(cut + 2) : '') : s.error;
+    },
+    stateOf(s) {
+      if (s.kind === 'file') return ['idle', T('SourceImported')];
+      return [s.state === 'running' ? 'ok' : s.state === 'error' ? 'alert' : 'learning', T('SourceState_' + s.state)];
+    },
+    updateStates() {
+      for (const s of S.sources) {
+        const card = this.list.querySelector('[data-source="' + s.id + '"]');
+        if (!card) continue;
+        const [state, text] = this.stateOf(s);
+        const chip = card.querySelector('.source-state');
+        chip.className = 'status source-state ' + state;
+        chip.textContent = '';
+        chip.appendChild(icon(state));
+        chip.appendChild(document.createTextNode(text));
+        const err = card.querySelector('.source-error');
+        const msg = this.errorText(s);
+        err.textContent = msg;
+        err.classList.toggle('hidden', !msg);
+      }
+    },
     sourceCard(s) {
-      const chans = sortedChannels().filter(c => c.source === s.id);
-      const state = s.kind === 'file' ? 'idle' : s.state === 'running' ? 'ok' : s.state === 'error' ? 'alert' : 'learning';
-      const stateText = s.kind === 'file' ? T('SourceImported') : T('SourceState_' + s.state);
+      const chans = this.channelsOf(s);
+      const [state, stateText] = this.stateOf(s);
       const actions = h('div', { class: 'toolbar' });
       if (s.kind !== 'file')
         actions.appendChild(h('button', { class: 'btn', type: 'button', text: s.enabled ? T('Pause') : T('Resume'),
@@ -984,18 +1049,19 @@
       if (['http', 'mqtt', 'modbus', 'serial', 'folder'].includes(s.kind))
         actions.appendChild(h('button', { class: 'btn', type: 'button', text: T('Settings'), onclick: () => this.openForm(s.kind, s) }));
       actions.appendChild(h('button', { class: 'btn danger', type: 'button', text: T('Delete'), onclick: async () => {
-        if (!confirm(F('ConfirmDelete', s.name, chans.length))) return;
+        if (!confirm(F('ConfirmDelete', s.name, this.channelsOf(s).length))) return;
         await api('/api/sources/' + s.id, { method: 'DELETE' });
         await poll(); this.build();
       } }));
       const sum = this.summary(s);
-      return h('div', { class: 'card source' },
+      const err = this.errorText(s);
+      return h('div', { class: 'card source', 'data-source': s.id },
         h('div', { class: 'grow' }, h('div', { class: 'name', text: s.name }),
           h('div', { class: 'muted small', text: T('Kind_src_' + s.kind) + ' · ' + F('ChannelCount', chans.length) + ' · ' + F('AddedAt', HD.fmtTime(s.created, false)) }),
           sum ? h('div', { class: 'muted small', text: sum }) : null,
-          s.error ? h('div', { class: 'notice error', text: s.error }) : null,
+          h('div', { class: 'notice error source-error' + (err ? '' : ' hidden'), text: err }),
           s.kind === 'http' ? this.httpHelp(s) : null),
-        h('span', { class: 'status ' + state }, icon(state), stateText), actions);
+        h('span', { class: 'status source-state ' + state }, icon(state), stateText), actions);
     },
     showDrop() {
       this.importBox.textContent = '';
@@ -1022,7 +1088,7 @@
         let data = {};
         try { data = JSON.parse(xhr.responseText); } catch (e) { }
         if (xhr.status === 200) this.preview(data);
-        else { this.showDrop(); this.importBox.prepend(h('p', { class: 'notice error', text: F('UploadFailed', data.error || xhr.status) })); }
+        else { this.showDrop(); this.importBox.prepend(h('p', { class: 'notice error', text: data.error ? errText({ message: data.error }) : F('UploadFailed', xhr.status) })); }
       };
       xhr.onerror = () => { this.showDrop(); this.importBox.prepend(h('p', { class: 'notice error', text: F('UploadFailed', 'network') })); };
       xhr.send(file);
@@ -1056,11 +1122,11 @@
         if (!columns.length) { msg.textContent = T('Err_no_columns'); msg.classList.remove('hidden'); return; }
         try {
           await api('/api/import/' + job.id + '/start', { method: 'POST', body: {
-            name: name.value, columns, time_column: Number(timeSel.value), zone: zone.value, interval: Number(interval.value), start: Date.now() } });
+            name: name.value, columns, time_column: Number(timeSel.value), zone: zone.value, interval: Number(interval.value) } });
           this.showDrop();
           await poll();
           this.buildJobs();
-        } catch (e) { msg.textContent = T('Err_' + e.message); msg.classList.remove('hidden'); }
+        } catch (e) { msg.textContent = errText(e); msg.classList.remove('hidden'); }
       };
       const info = F('FileInfo', L.encoding.toUpperCase(), L.delimiter === '\t' ? 'Tab' : L.delimiter, fmt(L.size / 1024) + ' KB');
       this.importBox.appendChild(h('div', { class: 'card' },
@@ -1092,30 +1158,30 @@
     },
     onLive() {
       if (this.sig() !== this.lastSig) this.build();
-      else this.buildJobs();
+      else { this.updateStates(); this.buildJobs(); }
     }
   };
 
   pages.settings = {
     render(root) {
       root.appendChild(h('h1', { text: T('SettingsTitle') }));
-      const msg = h('span', { class: 'muted small', role: 'status' });
-      const save = async body => {
-        try { S.info = await api('/api/settings', { method: 'POST', body }); msg.textContent = T('Saved'); } catch (e) { msg.textContent = e.message; }
+      const status = () => h('span', { class: 'muted small', role: 'status' });
+      const sensMsg = status(), retMsg = status();
+      const save = async (body, msg) => {
+        try { S.info = await api('/api/settings', { method: 'POST', body }); msg.textContent = T('Saved'); } catch (e) { msg.textContent = errText(e); }
       };
       const retention = h('input', { type: 'number', min: 1, max: 3650, value: S.info.retention_days, size: 6 });
       let theme = 'system';
       try { theme = localStorage.getItem('hoodata-theme') || 'system'; } catch (e) { }
       root.appendChild(h('section', {}, h('h2', { text: T('Sensitivity') }), h('div', { class: 'card' },
-        seg([['low', T('Sens_low')], ['normal', T('Sens_normal')], ['high', T('Sens_high')]], S.info.sensitivity, v => save({ sensitivity: v }), T('Sensitivity')),
-        h('p', { class: 'muted small', text: T('SensitivityHelp') }))));
+        seg([['low', T('Sens_low')], ['normal', T('Sens_normal')], ['high', T('Sens_high')]], S.info.sensitivity, v => save({ sensitivity: v }, sensMsg), T('Sensitivity')),
+        sensMsg, h('p', { class: 'muted small', text: T('SensitivityHelp') }))));
       root.appendChild(h('section', {}, h('h2', { text: T('Retention') }), h('div', { class: 'card' },
         h('div', { class: 'form-row' }, h('label', { class: 'field' }, T('RetentionDays'), retention),
-          h('button', { class: 'btn', type: 'button', text: T('Save'), onclick: () => save({ retention_days: Number(retention.value) }) })),
+          h('button', { class: 'btn', type: 'button', text: T('Save'), onclick: () => save({ retention_days: Number(retention.value) }, retMsg) }), retMsg),
         h('p', { class: 'muted small', text: T('RetentionHelp') }))));
       root.appendChild(h('section', {}, h('h2', { text: T('Theme') }), h('div', { class: 'card' },
         seg([['system', T('Theme_system')], ['light', T('Theme_light')], ['dark', T('Theme_dark')]], theme, v => { setTheme(v); }, T('Theme')))));
-      root.appendChild(msg);
       root.appendChild(h('section', {}, h('h2', { text: T('About') }), h('div', { class: 'card' }, h('dl', {},
         h('dt', { class: 'muted small', text: T('Version') }), h('dd', { text: S.info.version }),
         h('dt', { class: 'muted small', text: T('DataFolder') }), h('dd', { text: S.info.data_dir }),

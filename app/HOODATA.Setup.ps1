@@ -72,8 +72,41 @@ function Set-CompilerTemp {
 function Import-HoodataEngine([string]$AppDir, [string[]]$Extra = @()) {
     if ('Hoodata.Engine' -as [type]) { return }
     Set-CompilerTemp
-    $files = @(Get-ChildItem (Join-Path $AppDir 'engine') -Filter *.cs | Sort-Object Name | ForEach-Object { $_.FullName }) + $Extra
+    # -LiteralPath: a folder name with [ ] in it is not a wildcard.
+    $files = @(Get-ChildItem -LiteralPath (Join-Path $AppDir 'engine') -Filter *.cs | Sort-Object Name | ForEach-Object { $_.FullName }) + $Extra
     Add-Type -Path $files -ReferencedAssemblies System, System.Core, System.Xml, System.Security, System.IO.Compression, System.IO.Compression.FileSystem
+}
+
+# A HOODATA data folder this user owns but whose permissions are open (copied, restored from a backup, moved to
+# another drive) is made private again instead of being passed over. One owned by someone else is not used, and
+# neither is a folder named 'data' that holds something else (it keeps its permissions).
+function Protect-OwnDirectory([string]$Path) {
+    $entries = @([IO.Directory]::GetFileSystemEntries($Path))
+    if ($entries.Count -gt 0 -and -not [IO.File]::Exists((Join-Path $Path 'hoodata.db'))) { return }
+    $acl = [IO.Directory]::GetAccessControl($Path)
+    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($script:PrivateSids -notcontains $owner) { return }
+    $security = New-Object Security.AccessControl.DirectorySecurity
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($sid in $script:PrivateSids) {
+        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule (
+                    (New-Object Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+    }
+    [IO.Directory]::SetAccessControl($Path, $security)
+}
+
+# True when users other than this one (Users, Authenticated Users, Everyone, another account) may change the files
+# HOODATA compiles and runs: then whoever changes them runs code as this user. Extracting under C:\ gives that.
+function Test-SharedWritable([string]$Path) {
+    $write = [Security.AccessControl.FileSystemRights]'WriteData, AppendData, Delete, ChangePermissions, TakeOwnership'
+    $acl = [IO.Directory]::GetAccessControl($Path)
+    foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $sid = $rule.IdentityReference.Value
+        if ($script:PrivateSids -contains $sid -or $sid -eq 'S-1-3-0' -or $sid -like 'S-1-5-80-*') { continue }
+        if (($rule.FileSystemRights -band $write) -ne 0) { return $true }
+    }
+    $false
 }
 
 # The data stays next to start.bat, where it is easy to find, back up or delete. When that folder cannot be written
@@ -88,6 +121,7 @@ function Resolve-DataDirectory([string]$Root) {
     foreach ($dir in $candidates) {
         try {
             if (-not [IO.Directory]::Exists($dir)) { New-PrivateDirectory $dir }
+            if (-not (Test-PrivateDirectory $dir)) { Protect-OwnDirectory $dir }
             if (-not (Test-PrivateDirectory $dir)) { continue }
             if (Test-WritableDirectory $dir) { return [IO.Path]::GetFullPath($dir) }
         } catch {
@@ -110,14 +144,22 @@ function Write-RunFile([string]$DataDir, [int]$Port, [string]$Key) {
 
 function Read-RunFile([string]$DataDir) {
     $path = Join-Path $DataDir 'run.json'
-    # The first HOODATA may still be starting.
-    for ($i = 0; $i -lt 40; $i++) {
-        if (Test-Path -LiteralPath $path) {
-            try { return [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { }
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    $null
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try { [IO.File]::ReadAllText($path) | ConvertFrom-Json } catch { $null }
+}
+
+# Whether a HOODATA dashboard answers on the port (without the key it answers 401).
+function Test-Dashboard([int]$Port) {
+    try {
+        $req = [Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/api/info")
+        $req.Timeout = 2000
+        $res = $req.GetResponse()
+        $res.Close()
+        return $true
+    } catch [Net.WebException] {
+        $r = $_.Exception.Response
+        return ($r -ne $null -and [int]$r.StatusCode -eq 401)
+    } catch { return $false }
 }
 
 function Remove-RunFile([string]$DataDir) {

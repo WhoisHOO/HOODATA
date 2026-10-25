@@ -24,50 +24,63 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     exit 1
 }
 
-. (Join-Path $AppDir 'HOODATA.Setup.ps1')
-
-$Strings = Get-Content -Raw -Encoding UTF8 (Join-Path $AppDir 'strings.json') | ConvertFrom-Json
-$Lang = if ($env:HOODATA_LANG -in @('ko', 'en')) { $env:HOODATA_LANG }
-        elseif ([Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'ko') { 'ko' } else { 'en' }
-$T = $Strings.$Lang
+# Until strings.json is read, a failure is reported in English: start.bat hides this console, so an error that is not
+# shown in a message box would leave the user with nothing at all.
+$T = $null
 
 function Format-Text([string]$Key) { [string]::Format([string]$T.$Key, [object[]]$args) }
 
 function Show-Fatal([string]$Message) {
-    $text = Format-Text 'Fatal' $Message
+    $text = if ($T) { Format-Text 'Fatal' $Message } else { "HOODATA could not start.`n`n$Message" }
     if ($Unattended) { [Console]::Error.WriteLine($text); return }
-    Add-Type -AssemblyName PresentationFramework
-    [void][Windows.MessageBox]::Show($text, 'HOODATA', 'OK', 'Error')
+    try {
+        Add-Type -AssemblyName PresentationFramework
+        [void][Windows.MessageBox]::Show($text, 'HOODATA', 'OK', 'Error')
+    } catch { }
 }
 
 try {
+    . (Join-Path $AppDir 'HOODATA.Setup.ps1')
+    $Strings = Get-Content -LiteralPath (Join-Path $AppDir 'strings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $Lang = if ($env:HOODATA_LANG -in @('ko', 'en')) { $env:HOODATA_LANG }
+            elseif ([Globalization.CultureInfo]::CurrentUICulture.TwoLetterISOLanguageName -eq 'ko') { 'ko' } else { 'en' }
+    $T = $Strings.$Lang
     $DataDir = Resolve-DataDirectory $Root
 } catch {
     Show-Fatal $_.Exception.Message
     exit 1
 }
 
-# One HOODATA per data folder. A second start opens the running one's dashboard instead.
-$mutexName = 'Local\HOODATA-' + (Get-PathHash $DataDir)
-$created = $false
-$mutex = New-Object Threading.Mutex($true, $mutexName, [ref]$created)
-if (-not $created) {
-    $run = Read-RunFile $DataDir
-    if ($run -and -not $env:HOODATA_NO_BROWSER) { Open-Dashboard $run.port $run.key }
-    exit 0
+# One HOODATA per data folder. A second start opens the running one's dashboard once it answers; when the running
+# one is just closing, this start waits for it and then starts normally.
+$mutex = New-Object Threading.Mutex($false, ('Local\HOODATA-' + (Get-PathHash $DataDir)))
+$owned = $false
+try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+if (-not $owned) {
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $owned -and $wait.Elapsed.TotalSeconds -lt 30) {
+        $run = Read-RunFile $DataDir
+        if ($run -and (Test-Dashboard $run.port)) {
+            if (-not $env:HOODATA_NO_BROWSER) { Open-Dashboard $run.port $run.key }
+            exit 0
+        }
+        try { $owned = $mutex.WaitOne(500) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    }
+    if (-not $owned) { exit 0 }
 }
-
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+# A run file left by a HOODATA that did not close properly (a crash, Windows shutting down) is stale.
+Remove-RunFile $DataDir
 
 $engine = $null
 $window = $null
 
+# The run file goes first, so a start while this one is still stopping waits for it instead of opening its dashboard.
 function Stop-Hoodata {
+    Remove-RunFile $DataDir
     if ($script:engine) {
         try { $script:engine.Stop() } catch { }
         $script:engine = $null
     }
-    Remove-RunFile $DataDir
 }
 
 function Start-Hoodata {
@@ -93,22 +106,42 @@ if ($env:HOODATA_RUN_SECONDS) {
     exit 0
 }
 
-[xml]$xaml = Get-Content -Raw -Encoding UTF8 (Join-Path $AppDir 'Window.xaml')
-$window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
-$ui = @{}
-foreach ($name in 'Version', 'Status', 'Address', 'Hint', 'OpenButton', 'StopButton') { $ui[$name] = $window.FindName($name) }
-$window.Title = 'HOODATA'
-$ui.Status.Text = $T.Starting
-$ui.Hint.Text = $T.Hint
-$ui.OpenButton.Content = $T.OpenDashboard
-$ui.StopButton.Content = $T.Stop
-$ui.OpenButton.IsEnabled = $false
+try {
+    Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+    [xml]$xaml = Get-Content -LiteralPath (Join-Path $AppDir 'Window.xaml') -Raw -Encoding UTF8
+    $window = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $xaml))
+    $ui = @{}
+    foreach ($name in 'Version', 'Status', 'Address', 'Folder', 'Warning', 'Hint', 'OpenButton', 'StopButton') { $ui[$name] = $window.FindName($name) }
+    $window.Title = 'HOODATA'
+    $ui.Status.Text = $T.Starting
+    $ui.Hint.Text = $T.Hint
+    $ui.OpenButton.Content = $T.OpenDashboard
+    $ui.StopButton.Content = $T.Stop
+    $ui.OpenButton.IsEnabled = $false
+    $ui.Folder.Text = Format-Text 'DataFolderAt' $DataDir
+    # Other accounts on this PC may change the files HOODATA runs: say so, and where to put it instead.
+    if (Test-SharedWritable $AppDir) {
+        $ui.Warning.Text = $T.SharedFolderWarning
+        $ui.Warning.Visibility = 'Visible'
+    }
+} catch {
+    Show-Fatal $_.Exception.Message
+    $mutex.ReleaseMutex()
+    exit 1
+}
 
 function Update-Status {
     if (-not $script:engine) { return }
+    $err = $script:engine.StoreError
+    if ($err) {
+        $ui.Status.Text = Format-Text 'StoreError' $err
+        $ui.Status.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString('#B42828')
+        return
+    }
     $midnight = [DateTimeOffset]::new([DateTime]::Today).ToUnixTimeMilliseconds()
     $events = $script:engine.EventsSince($midnight)
     $ui.Status.Text = Format-Text 'Running' $script:engine.ChannelCount $script:engine.RunningSources $events
+    $ui.Status.Foreground = [Windows.Media.BrushConverter]::new().ConvertFromString('#1A1A1A')
 }
 
 $timer = New-Object Windows.Threading.DispatcherTimer
@@ -156,6 +189,9 @@ $window.Add_Closing({
 $script:failed = $false
 try {
     [void]$window.ShowDialog()
+} catch {
+    Show-Fatal $_.Exception.Message
+    $script:failed = $true
 } finally {
     $timer.Stop()
     Stop-Hoodata

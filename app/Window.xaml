@@ -71,6 +71,9 @@
     <TextBlock x:Name="Status" Margin="0,14,0,0" FontSize="14" TextWrapping="Wrap"/>
     <TextBox x:Name="Address" Margin="0,4,0,0" IsReadOnly="True" BorderThickness="0" Padding="0" Background="Transparent"
              Foreground="{StaticResource Muted}" FontSize="12"/>
+    <TextBox x:Name="Folder" Margin="0,2,0,0" IsReadOnly="True" BorderThickness="0" Padding="0" Background="Transparent"
+             Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap"/>
+    <TextBlock x:Name="Warning" Margin="0,10,0,0" FontSize="12" Foreground="#8A5A00" TextWrapping="Wrap" Visibility="Collapsed"/>
 
     <Grid Margin="0,18,0,0">
       <Grid.ColumnDefinitions>
