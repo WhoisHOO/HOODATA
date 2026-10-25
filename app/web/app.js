@@ -631,7 +631,8 @@
       // The first visit with nothing analysed yet, or an old analysis: run it.
       if (first && (!r || Date.now() - r.created > 3600e3)) { this.run(); return; }
       if (data.error) this.status.textContent = F('AnalyzeFailed', data.error);
-      else if (r) this.status.textContent = F('AnalyzedAt', HD.fmtTime(r.created, false), fmt(r.slots), fmtDur(r.slot_ms), fmt(r.tests));
+      else if (r) this.status.textContent = F('AnalyzedAt', HD.fmtTime(r.created, false), fmt(r.slots), fmtDur(r.slot_ms), fmt(r.tests),
+        HD.fmtTime(r.from, false).slice(0, 10), HD.fmtTime(r.to, false).slice(0, 10));
       this.show(r);
     },
     show(r) {
