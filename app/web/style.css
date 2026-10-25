@@ -209,6 +209,8 @@ label.check { display: inline-flex; align-items: center; gap: 6px; cursor: point
 
 .group-title { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; font-size: 14px; font-weight: 600; }
 
+.group-note { margin: 0 0 10px; max-width: 72ch; }
+
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; }
 
 .tile {

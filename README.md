@@ -28,8 +28,8 @@ progress are in [docs/ROADMAP.md](docs/ROADMAP.md) (Korean).
 <p align="center"><img src="docs/screenshot-channel-en.png" alt="A channel over three weeks, with its spikes marked, its noise level and its anomalies" width="820" /></p>
 
 It uses well-known statistical methods implemented in this repository, not AI models, so every finding can say why it
-was made. A general engine comes first; versions for particular fields (smart farms, fish farms, factory equipment)
-will build on it.
+was made. This repository is the general engine. Versions for particular fields and companies will be made from it
+separately once the engine is finished.
 
 ## Start
 
@@ -38,7 +38,9 @@ will build on it.
    Control on, Windows otherwise blocks `start.bat`).
 2. Extract it in one of your own folders (Downloads, Documents, Desktop; a folder right under `C:\` can be changed
    by other users of the PC) and double-click **`start.bat`**. A small HOODATA window opens, and the dashboard opens
-   in your browser. This PC's own values appear within seconds.
+   in your browser. Within seconds, this PC's own values (CPU, memory,
+   disk and more) appear as an example: they let you see HOODATA work before you connect a device, and keep an eye on
+   the PC that collects your data. If you don't need them, pause or delete this PC under **Data sources**.
 3. Add your data under **Data sources**: drop a CSV or Excel file, or add a device.
 
 HOODATA collects while its window is open; minimised is fine, closing stops it. The data stays in the `data` folder

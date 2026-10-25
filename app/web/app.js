@@ -260,9 +260,11 @@
         if (!list.length) continue;
         const kind = T('Kind_src_' + src.kind);
         const title = h('h2', { class: 'group-title' }, src.name, kind !== src.name ? h('span', { class: 'muted small', text: kind }) : null);
+        // Added on the first start, so it says why it is there.
+        const note = src.kind === 'pc' ? h('p', { class: 'muted small group-note', text: T('PcWhy') }) : null;
         const grid = h('div', { class: 'cards' });
         for (const ch of list) grid.appendChild(this.tile(ch));
-        this.body.appendChild(h('section', {}, title, grid));
+        this.body.appendChild(h('section', {}, title, note, grid));
       }
       const hidden = sortedChannels().filter(c => c.hidden).length;
       if (hidden > 0)
@@ -1059,6 +1061,7 @@
         h('div', { class: 'grow' }, h('div', { class: 'name', text: s.name }),
           h('div', { class: 'muted small', text: T('Kind_src_' + s.kind) + ' · ' + F('ChannelCount', chans.length) + ' · ' + F('AddedAt', HD.fmtTime(s.created, false)) }),
           sum ? h('div', { class: 'muted small', text: sum }) : null,
+          s.kind === 'pc' ? h('div', { class: 'muted small', text: T('PcWhy') }) : null,
           h('div', { class: 'notice error source-error' + (err ? '' : ' hidden'), text: err }),
           s.kind === 'http' ? this.httpHelp(s) : null),
         h('span', { class: 'status source-state ' + state }, icon(state), stateText), actions);
