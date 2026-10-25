@@ -265,6 +265,45 @@ namespace Hoodata.Eval
             return s;
         }
 
+        // Three weeks of a greenhouse, one row a minute, written as a CSV file, with two patterns put in:
+        //   the soil sensor spikes far more often when the humidity is high at night (condensation), and
+        //   the pressure sensor drops out a few minutes after the pump switches on (a voltage dip).
+        // Returns the number of spikes and dropouts put in.
+        public static int[] GreenhouseCsv(int seed, string path)
+        {
+            var g = new Gauss(seed);
+            int n = 21 * 1440;
+            DateTime start = new DateTime(2026, 1, 5, 0, 0, 0, DateTimeKind.Local);
+            var sb = new System.Text.StringBuilder("time,humidity,temperature,soil,pump,pressure\n");
+            int spikes = 0, drops = 0, dropLeft = 0;
+            double walkH = 0, walkS = 0;
+            for (int i = 0; i < n; i++)
+            {
+                double hour = (i % 1440) / 60.0;
+                walkH = 0.99 * walkH + 0.3 * g.N();
+                walkS = 0.995 * walkS + 0.01 * g.N();
+                double humidity = 72 + 18 * Math.Cos(2 * Math.PI * (hour - 3) / 24) + walkH + 0.5 * g.N();
+                double temperature = 22 - 6 * Math.Cos(2 * Math.PI * (hour - 3) / 24) + 0.1 * g.N();
+                double soil = 35 + walkS + 0.05 * g.N();
+                bool pump = (hour >= 6 && hour < 6.5) || (hour >= 18 && hour < 18.5);
+                double p = (humidity > 86 && hour >= 1 && hour < 6) ? 0.004 : 0.00005;
+                if (g.U() < p) { soil += (g.U() < 0.5 ? -1 : 1) * (3 + 3 * g.U()); spikes++; }
+                // A dropout of 15 minutes starts 3 to 8 minutes after the pump switches on, six times out of ten.
+                int sincePumpOn = (int)Math.Round((hour - (hour >= 18 ? 18 : 6)) * 60);
+                if ((hour >= 6 && hour < 6.5) || (hour >= 18 && hour < 18.5))
+                    if (sincePumpOn == 3 + (i / 1440) % 6 && g.U() < 0.6) { dropLeft = 15; drops++; }
+                string pressure = dropLeft > 0 ? "" : (101.3 + 0.02 * g.N()).ToString("0.000", System.Globalization.CultureInfo.InvariantCulture);
+                if (dropLeft > 0) dropLeft--;
+                sb.Append(start.AddMinutes(i).ToString("yyyy-MM-dd HH:mm:ss")).Append(',')
+                  .Append(humidity.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)).Append(',')
+                  .Append(temperature.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)).Append(',')
+                  .Append(soil.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)).Append(',')
+                  .Append(pump ? "1" : "0").Append(',').Append(pressure).Append('\n');
+            }
+            System.IO.File.WriteAllText(path, sb.ToString());
+            return new[] { spikes, drops };
+        }
+
         public static List<Scenario> All(int seed)
         {
             return new List<Scenario> {

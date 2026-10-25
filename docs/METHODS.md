@@ -1,4 +1,4 @@
-# How HOODATA finds anomalies
+# How HOODATA finds anomalies and patterns
 
 HOODATA uses no AI model. Each channel (one sensor, one column of a file) has a detector fed with values in time
 order. The detector keeps a few recent statistics and compares each new value with them. These are well-known,
@@ -92,6 +92,53 @@ What this does not show:
   in the anomaly list is meant for them.
 - Only one channel is looked at a time. Relations between channels are the job of the pattern analysis.
 
+# How HOODATA finds patterns
+
+The pattern analysis ([`app/engine/Patterns.cs`](../app/engine/Patterns.cs)) asks two questions of the anomalies
+found so far: in which situations does an anomaly happen more often than usual, and what tends to come shortly
+before it. It is association, not cause: two things that happen together may both have a third cause.
+
+**Slots and situations.** The period is cut into slots of 5 minutes (longer when there would be more than 20 000).
+Only time with data counts, so the months between an imported file and today's live values are not slots. Each
+slot gets situations:
+
+- the time of day, in 4-hour bins;
+- the weekday and weekday or weekend, when there are at least two weeks of slots;
+- for every channel, *high* or *low*: its 5-minute mean in its own top or bottom 20%;
+- for a channel with at most four values (a pump on or off, a door open or shut), each value.
+
+A channel's own level is not used for its own level changes, unusual levels or spikes: these move the level
+themselves, so the result would only restate them.
+
+**Rates compared.** For each channel and kind with at least 5 anomalies, and each situation, the share of slots in
+which such an anomaly started is compared with the share over all the slots that channel has data in. The lift is
+the ratio of the two; Fisher's exact test (one-sided, hypergeometric) [6] gives how likely so many would fall in
+that situation by chance.
+
+**Two situations together.** The 8 strongest single situations of a target are also tried in pairs, as in subgroup
+discovery [7]. A pair is kept only when it is at least 1.2 times as strong as either part and, within each part's
+slots, the other part is still significant on its own (p ≤ 0.01). Without that second check, a weekday added to a
+real condition picks up a few chance hits and looks like a sharper rule.
+
+**What comes before.** For anomalies, and for switches changing to a value, HOODATA counts how many anomalies B start
+within 5 minutes, 30 minutes or 2 hours after an A. By chance, the expected number is B's count times the share of
+time covered by those windows; the binomial tail gives the p-value, and the window with the smallest is kept. A
+sequence must also account for at least a fifth of B, so that two things that both happen at dawn do not look like
+one leading to the other.
+
+**Corrected for testing many.** Every test made, including those dropped along the way, goes into one
+Benjamini–Hochberg correction [8]. Shown are results with a false discovery rate of at most 5%, a lift of at least
+2 and at least 3 anomalies in the situation.
+
+**Checked on planted patterns.** [`dev/eval/Synthetic.cs`](../dev/eval/Synthetic.cs) writes three weeks of a
+greenhouse as a CSV file with two patterns put in: a soil sensor that spikes far more often when the humidity is
+high at night, and a pressure sensor that drops out a few minutes after the pump switches on. Imported and analysed
+like any file, the analysis reports the pressure gaps while the pump runs (lift 29, all 20 of them) and after the
+pump switches on (within 30 minutes: 20 against 0.8 by chance), and the soil spikes when the humidity is high
+(lift 4.8, 22 of 23). It also reports the soil spikes when the temperature is low and between 00:00 and 04:00: true
+associations in this data, since the humid hours are the cold night hours, but not the cause. Nothing is reported
+for the temperature channel, which had nothing put in.
+
 ## Sources
 
 [1] Hampel, F. R. (1974). The influence curve and its role in robust estimation. *Journal of the American Statistical Association*, 69(346), 383–393. DOI: 10.1080/01621459.1974.10482962 · verified 2026-10-25
@@ -103,3 +150,9 @@ What this does not show:
 [4] Hyndman, R. J., & Fan, Y. (1996). Sample quantiles in statistical packages. *The American Statistician*, 50(4), 361–365. DOI: 10.1080/00031305.1996.10473566 · verified 2026-10-25
 
 [5] Wu, R., & Keogh, E. J. (2023). Current time series anomaly detection benchmarks are flawed and are creating the illusion of progress. *IEEE Transactions on Knowledge and Data Engineering*, 35(3), 2421–2429. DOI: 10.1109/TKDE.2021.3112126 · verified 2026-10-25
+
+[6] Fisher, R. A. (1922). On the interpretation of χ2 from contingency tables, and the calculation of P. *Journal of the Royal Statistical Society*, 85(1), 87–94. DOI: 10.2307/2340521 · verified 2026-10-25
+
+[7] Herrera, F., Carmona, C. J., González, P., & del Jesus, M. J. (2011). An overview on subgroup discovery: foundations and applications. *Knowledge and Information Systems*, 29(3), 495–525. DOI: 10.1007/s10115-010-0356-2 · verified 2026-10-25
+
+[8] Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. *Journal of the Royal Statistical Society: Series B (Methodological)*, 57(1), 289–300. DOI: 10.1111/j.2517-6161.1995.tb02031.x · verified 2026-10-25

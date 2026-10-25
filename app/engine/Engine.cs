@@ -654,6 +654,37 @@ namespace Hoodata
             }
         }
 
+        // ---- patterns ----
+
+        public volatile bool PatternsRunning;
+        public string PatternsError;
+
+        // Runs the pattern analysis in the background; the result is kept in the database.
+        public bool StartPatterns(long from, long to)
+        {
+            lock (Gate)
+            {
+                if (PatternsRunning) return false;
+                PatternsRunning = true;
+            }
+            var ids = new List<int>();
+            foreach (Channel ch in Channels()) if (!ch.Info.Hidden) ids.Add(ch.Info.Id);
+            var t = new Thread(() =>
+            {
+                try
+                {
+                    Flush();
+                    PatternResult r = PatternAnalyzer.Run(Store, ids, from, to);
+                    Store.SetMeta("patterns", r.ToJson());
+                    PatternsError = null;
+                }
+                catch (Exception e) { PatternsError = e.Message; Say("patterns: " + e); }
+                finally { PatternsRunning = false; }
+            }) { IsBackground = true, Name = "HOODATA patterns" };
+            t.Start();
+            return true;
+        }
+
         // ---- imports ----
 
         public void AddJob(ImportJob job)

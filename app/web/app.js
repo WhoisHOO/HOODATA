@@ -567,6 +567,166 @@
     onLive(data) { if (data.events.length && this.offset === 0) { clearTimeout(this.t); this.t = setTimeout(() => this.load(), 500); } }
   };
 
+  // In which situations anomalies happen more often, what comes before them, and when they happen.
+  const chName = id => { const c = S.channels.get(id); return c ? c.name : '#' + id; };
+  const chUnit = id => { const c = S.channels.get(id); return c ? c.unit : ''; };
+
+  function dayName(d) {
+    // 4 January 2026 was a Sunday.
+    return new Intl.DateTimeFormat(S.lang === 'ko' ? 'ko-KR' : 'en-US', { weekday: 'long' }).format(new Date(2026, 0, 4 + d));
+  }
+
+  function condText(c) {
+    switch (c.type) {
+      case 'hour': return F('CondHour', c.from, c.to);
+      case 'weekday': return dayName(c.day);
+      case 'daytype': return T(c.weekend ? 'CondWeekend' : 'CondWeekday');
+      case 'high': return F('CondHigh', chName(c.ch), withUnit(c.value, chUnit(c.ch)));
+      case 'low': return F('CondLow', chName(c.ch), withUnit(c.value, chUnit(c.ch)));
+      case 'value': return F('CondValue', chName(c.ch), fmt(c.value));
+    }
+    return '';
+  }
+
+  function eventText(ch, kind) {
+    if (kind.startsWith('to:')) return F('SwitchTo', chName(ch), fmt(Number(kind.slice(3))));
+    return chName(ch) + ' · ' + T('Kind_' + kind);
+  }
+
+  const pct = x => fmt(Math.round(1000 * x) / 10) + '%';
+
+  pages.patterns = {
+    render(root) {
+      this.range = '30d';
+      root.appendChild(h('h1', { text: T('PatternsTitle') }));
+      root.appendChild(h('p', { class: 'lead', text: T('PatternsLead') }));
+      this.runBtn = h('button', { class: 'btn primary', type: 'button', text: T('Analyze'), onclick: () => this.run() });
+      this.status = h('span', { class: 'muted small', role: 'status' });
+      root.appendChild(h('div', { class: 'toolbar' },
+        seg([['7d', T('Range_7d')], ['30d', T('Range_30d')], ['all', T('Range_all')]], this.range, r => { this.range = r; this.run(); }, T('Period')),
+        this.runBtn, this.status));
+      this.body = h('div');
+      root.appendChild(this.body);
+      this.load(true);
+    },
+    destroy() { clearTimeout(this.timer); },
+    async run() {
+      const now = Date.now();
+      const span = RANGES.find(r => r[0] === this.range)[1];
+      await api('/api/patterns/run', { method: 'POST', body: { from: span ? now - span : 0, to: now } });
+      this.load(false);
+    },
+    async load(first) {
+      clearTimeout(this.timer);
+      const data = await api('/api/patterns');
+      this.runBtn.disabled = data.running;
+      if (data.running) {
+        this.status.textContent = T('Analyzing');
+        this.body.style.opacity = '0.6';
+        this.timer = setTimeout(() => this.load(false), 1000);
+        return;
+      }
+      this.body.style.opacity = '';
+      const r = data.result;
+      // The first visit with nothing analysed yet, or an old analysis: run it.
+      if (first && (!r || Date.now() - r.created > 3600e3)) { this.run(); return; }
+      if (data.error) this.status.textContent = F('AnalyzeFailed', data.error);
+      else if (r) this.status.textContent = F('AnalyzedAt', HD.fmtTime(r.created, false), fmt(r.slots), fmtDur(r.slot_ms), fmt(r.tests));
+      this.show(r);
+    },
+    show(r) {
+      this.body.textContent = '';
+      if (!r) return;
+      if (!r.rules.length && !r.sequences.length)
+        this.body.appendChild(h('p', { class: 'notice', text: r.targets ? T('NoPatterns') : T('FewEvents') }));
+
+      if (r.rules.length) {
+        this.body.appendChild(h('h2', { text: T('Situations') }));
+        const groups = new Map();
+        for (const rule of r.rules) {
+          const key = rule.ch + '/' + rule.kind;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(rule);
+        }
+        const list = h('div', { class: 'source-list' });
+        for (const rules of groups.values()) {
+          const first = rules[0];
+          rules.sort((a, b) => a.when.length - b.when.length || b.lift - a.lift);
+          const ul = h('ul', { class: 'rules' });
+          for (const rule of rules.slice(0, 6)) {
+            ul.appendChild(h('li', {},
+              h('span', { class: 'rule' }, F('RuleWhen', rule.when.map(condText).join(' · ')), h('strong', { text: ' ' + F('TimesUsual', fmt(Math.round(rule.lift * 10) / 10)) })),
+              h('div', { class: 'why', text: F('RuleEvidence', pct(rule.slots / rule.observed), fmt(rule.hits), fmt(rule.events), pct(rule.hits / rule.events)) })));
+          }
+          list.appendChild(h('div', { class: 'card' },
+            h('div', { class: 'detail-head' }, kindChip(first.kind), h('a', { href: '#/ch/' + first.ch, text: chName(first.ch) }),
+              h('span', { class: 'muted small', text: F('EventCount', fmt(first.events)) })), ul));
+        }
+        this.body.appendChild(list);
+      }
+
+      if (r.sequences.length) {
+        this.body.appendChild(h('h2', { text: T('Sequences') }));
+        const ul = h('ul', { class: 'rules' });
+        for (const s of r.sequences.slice(0, 30)) {
+          ul.appendChild(h('li', {},
+            h('span', { class: 'rule' }, F('SequenceText', eventText(s.ch_a, s.kind_a), fmtDur(s.window), eventText(s.ch_b, s.kind_b)),
+              h('strong', { text: ' ' + F('TimesUsual', fmt(Math.round(s.lift * 10) / 10)) })),
+            h('div', { class: 'why', text: F('SequenceEvidence', fmt(s.hits), fmt(s.count_b), fmt(Math.round(s.expected * 10) / 10)) })));
+        }
+        this.body.appendChild(h('div', { class: 'card' }, ul));
+      }
+
+      this.body.appendChild(h('h2', { text: T('WhenTitle') }));
+      this.body.appendChild(this.heatmap(r.heat));
+      this.body.appendChild(h('p', { class: 'muted small', text: T('PatternsMethod') }));
+    },
+    heatmap(heat) {
+      let max = 0;
+      for (const row of heat) for (const v of row) max = Math.max(max, v);
+      // Monday first.
+      const order = [1, 2, 3, 4, 5, 6, 0];
+      const grid = h('div', { class: 'heat', role: 'img', 'aria-label': T('WhenTitle') });
+      const tip = h('div', { class: 'tooltip hidden' });
+      grid.appendChild(h('span'));
+      for (let hr = 0; hr < 24; hr++) grid.appendChild(h('span', { class: 'heat-x', text: hr % 3 === 0 ? String(hr) : '' }));
+      for (const d of order) {
+        grid.appendChild(h('span', { class: 'heat-y', text: dayName(d) }));
+        for (let hr = 0; hr < 24; hr++) {
+          const v = heat[d][hr];
+          const step = v === 0 || max === 0 ? 0 : Math.min(6, 1 + Math.floor(5 * v / max));
+          const cell = h('span', { class: 'heat-cell s' + step });
+          cell.addEventListener('pointerenter', () => {
+            tip.textContent = '';
+            tip.appendChild(h('div', { class: 'v', text: F('EventCount', fmt(v)) }));
+            tip.appendChild(h('div', { text: dayName(d) + ' ' + F('CondHour', hr, hr + 1) }));
+            tip.classList.remove('hidden');
+            tip.style.left = (cell.offsetLeft + 18) + 'px';
+            tip.style.top = (cell.offsetTop - 8) + 'px';
+          });
+          cell.addEventListener('pointerleave', () => tip.classList.add('hidden'));
+          grid.appendChild(cell);
+        }
+      }
+      const legend = h('div', { class: 'legend' }, h('span', { text: T('Fewer') }),
+        [1, 2, 3, 4, 5, 6].map(s => h('span', { class: 'heat-cell s' + s })), h('span', { text: T('More') }));
+      // The same numbers as a table, for reading without colour.
+      const table = h('div', { class: 'table-wrap hidden' });
+      const btn = h('button', { class: 'btn', type: 'button', text: T('ShowTable'), 'aria-expanded': 'false', onclick: () => {
+        const show = table.classList.contains('hidden');
+        table.classList.toggle('hidden', !show);
+        btn.textContent = T(show ? 'HideTable' : 'ShowTable');
+        btn.setAttribute('aria-expanded', String(show));
+        if (show && !table.firstChild) {
+          const head = h('tr', {}, h('th'), Array.from({ length: 24 }, (_, i) => h('th', { class: 'n', text: String(i) })));
+          const body = h('tbody', {}, order.map(d => h('tr', {}, h('th', { text: dayName(d) }), heat[d].map(v => h('td', { class: 'n', text: String(v) })))));
+          table.appendChild(h('table', {}, h('thead', {}, head), body));
+        }
+      } });
+      return h('div', { class: 'card heat-card' }, h('div', { class: 'heat-wrap' }, grid, tip), h('div', { class: 'toolbar' }, legend, h('span', { class: 'grow' }), btn), table);
+    }
+  };
+
   // Statistics of every channel for a period.
   pages.stats = {
     render(root) {
@@ -808,7 +968,7 @@
 
   // ---- routing ----
 
-  const NAV = [['overview', '#/', 'NavOverview'], ['events', '#/events', 'NavEvents'], ['stats', '#/stats', 'NavStats'],
+  const NAV = [['overview', '#/', 'NavOverview'], ['events', '#/events', 'NavEvents'], ['patterns', '#/patterns', 'NavPatterns'], ['stats', '#/stats', 'NavStats'],
     ['sources', '#/sources', 'NavSources'], ['settings', '#/settings', 'NavSettings']];
 
   function route() {

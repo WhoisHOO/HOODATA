@@ -355,3 +355,58 @@ Describe 'Engine and dashboard API' {
         $engine.Channels() | Where-Object { $_.Info.Key -eq 'level' } | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Pattern analysis' {
+    BeforeAll {
+        $dir = New-TestDir
+        $csv = Join-Path $dir 'greenhouse.csv'
+        $script:put = [Hoodata.Eval.Synthetic]::GreenhouseCsv(11, $csv)
+        $engine = New-Object Hoodata.Engine($AppDir, $dir)
+        $engine.Start(0)
+        $job = [Hoodata.ImportJob]::Prepare($csv, 'greenhouse.csv')
+        $engine.AddJob($job)
+        $job.Run($engine)
+        $script:key = @{}
+        $ids = New-Object 'System.Collections.Generic.List[int]'
+        foreach ($c in $engine.Channels()) { $script:key[$c.Info.Id] = $c.Info.Key; if ($c.Info.Key -ne 'cpu') { $ids.Add($c.Info.Id) } }
+        $from = [Hoodata.Clock]::FromUtc([DateTime]::new(2026, 1, 5, 0, 0, 0, [DateTimeKind]::Local).ToUniversalTime())
+        $script:res = [Hoodata.PatternAnalyzer]::Run($engine.Store, $ids, $from, $from + 21L * 86400000)
+        function Find-Rule([string]$Channel, [string]$Kind, [string]$Type, [string]$On) {
+            $script:res.Rules | Where-Object {
+                $script:key[$_.Ch] -eq $Channel -and $_.Kind -eq $Kind -and $_.When.Count -eq 1 -and
+                $_.When[0].Type -eq $Type -and $script:key[$_.When[0].Ch] -eq $On
+            }
+        }
+    }
+    AfterAll {
+        $engine.Stop()
+        Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+    }
+
+    It 'finds that the pressure drops out while the pump runs' {
+        $rule = Find-Rule 'pressure' 'gap' 'value' 'pump'
+        $rule | Should -Not -BeNullOrEmpty
+        $rule.When[0].Value | Should -Be 1
+        $rule.Lift | Should -BeGreaterThan 10
+    }
+
+    It 'finds that the soil sensor spikes when the humidity is high' {
+        $rule = Find-Rule 'soil' 'spike' 'high' 'humidity'
+        $rule | Should -Not -BeNullOrEmpty
+        $rule.Lift | Should -BeGreaterThan 3
+    }
+
+    It 'finds that a dropout follows the pump switching on' {
+        $seq = $script:res.Sequences | Where-Object { $script:key[$_.ChA] -eq 'pump' -and $_.KindA -eq 'to:1' -and $script:key[$_.ChB] -eq 'pressure' -and $_.KindB -eq 'gap' }
+        $seq | Should -Not -BeNullOrEmpty
+        $seq.Hits | Should -BeGreaterOrEqual ($script:put[1] * 0.9)
+    }
+
+    It 'adds no chance conditions to a real one' {
+        $script:res.Rules | Where-Object { $_.When.Count -gt 1 -and ($_.When | Where-Object Type -in 'weekday', 'daytype') } | Should -BeNullOrEmpty
+    }
+
+    It 'reports nothing on a channel that has no pattern put in' {
+        $script:res.Rules | Where-Object { $script:key[$_.Ch] -eq 'temperature' } | Should -BeNullOrEmpty
+    }
+}

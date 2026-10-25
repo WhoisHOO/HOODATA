@@ -7,7 +7,6 @@
     "Hint": "이 창이 열려 있는 동안 데이터를 모읍니다. 창을 내려 두어도 계속 모으고, 닫으면 멈춥니다.",
     "ConfirmClose": "HOODATA를 닫으면 데이터 모으기가 멈춥니다. 닫을까요?",
     "Fatal": "HOODATA를 시작하지 못했습니다.\n\n{0}",
-
     "PcSource": "이 PC",
     "Pc_cpu": "CPU 사용률",
     "Pc_memory": "메모리 사용률",
@@ -16,7 +15,6 @@
     "Pc_net_out": "네트워크 보내기",
     "Pc_battery": "배터리",
     "Pc_plugged": "전원 연결",
-
     "Kind_gap": "끊김",
     "Kind_spike": "튐",
     "Kind_step": "수준 변화",
@@ -31,13 +29,11 @@
     "KindHelp_range": "채널 설정에서 정한 하한이나 상한을 벗어났습니다.",
     "KindHelp_noisy": "값의 흔들림(노이즈)이 평소보다 몇 배 커졌습니다. 전기적 잡음, 진동, 센서 노화일 수 있습니다.",
     "KindHelp_unusual": "같은 시간대의 평소 범위(지난 며칠)를 벗어난 상태가 15분 넘게 이어졌습니다. 며칠 치 데이터가 쌓여야 판단합니다.",
-
     "Status_ok": "정상",
     "Status_warn": "주의",
     "Status_alert": "이상",
     "Status_learning": "학습 중",
     "Status_idle": "가져온 데이터",
-
     "Why_gap": "{0} 동안 값 없음 · 평소 간격 {1}",
     "Why_spike": "튄 값 {0} · 평소 {1} · 평소 흔들림의 {2}배",
     "Why_spikeN": "가장 크게 튄 값 {0} · 평소 {1} · 평소 흔들림의 {2}배 · {3}번",
@@ -46,7 +42,6 @@
     "Why_range": "정한 범위 {0} ~ {1} · 값 {2}",
     "Why_noisy": "노이즈가 평소의 {0}배",
     "Why_unusual": "{0}시대 평소 범위 {1} ~ {2} · 값 {3}",
-
     "DurS": "{0}초",
     "DurM": "{0}분",
     "DurH": "{0}시간",
@@ -56,7 +51,6 @@
     "AgoM": "{0}분 전",
     "AgoH": "{0}시간 전",
     "AgoD": "{0}일 전",
-
     "NavOverview": "대시보드",
     "NavEvents": "특이사항",
     "NavStats": "통계",
@@ -66,7 +60,6 @@
     "Disconnected": "연결 끊김: HOODATA 창이 열려 있는지 확인하세요",
     "LockedTitle": "HOODATA 창에서 열어 주세요",
     "LockedText": "이 대시보드는 이 PC에서 HOODATA를 실행한 사람만 볼 수 있습니다. HOODATA 창의 '대시보드 열기'를 눌러 주세요.",
-
     "Range_1h": "1시간",
     "Range_6h": "6시간",
     "Range_24h": "24시간",
@@ -74,7 +67,6 @@
     "Range_30d": "30일",
     "Range_all": "전체",
     "Period": "기간",
-
     "OverviewTitle": "대시보드",
     "OverviewLead": "채널마다 지금 값과 최근 1시간의 흐름입니다. 채널을 누르면 자세히 볼 수 있습니다.",
     "EmptyText": "아직 데이터가 없습니다. CSV 파일을 가져오거나 데이터 연결을 추가해 주세요.",
@@ -119,7 +111,6 @@
     "Save": "저장",
     "Saved": "저장했습니다.",
     "LimitHelp": "하한과 상한을 정하면 그 범위를 벗어날 때 '범위 밖'으로 기록합니다. 비워 두면 쓰지 않습니다.",
-
     "EventsTitle": "특이사항",
     "EventsLead": "HOODATA가 찾은 특이사항입니다. 각 줄에 그렇게 본 이유가 있습니다.",
     "Channel": "채널",
@@ -137,7 +128,6 @@
     "Newer": "최근 쪽",
     "Older": "이전 쪽",
     "ShowingOf": "{2}건 중 {0}–{1}",
-
     "StatsTitle": "통계",
     "StatsLead": "채널마다 고른 기간의 통계입니다.",
     "StatsHelp": "통계는 1분 요약으로 계산합니다. 노이즈는 그 기간의 1분 노이즈 추정값의 평균이고, 끊긴 시간은 '끊김' 특이사항의 길이를 더한 것입니다.",
@@ -151,7 +141,6 @@
     "StatEvents": "특이사항",
     "StatFirst": "처음",
     "StatLast": "마지막",
-
     "SourcesTitle": "데이터 연결",
     "SourcesLead": "HOODATA가 데이터를 받는 곳입니다. 지금 모으는 연결과 가져온 파일이 있습니다.",
     "AddSource": "추가하기",
@@ -217,7 +206,6 @@
     "ImportUnsorted": "시간순이 아닌 줄 {0}개는 저장만 했습니다",
     "ImportFailed": "가져오지 못했습니다: {0}",
     "SeeDashboard": "대시보드에서 보기",
-
     "SettingsTitle": "설정",
     "Sensitivity": "특이사항 민감도",
     "Sens_low": "낮음",
@@ -235,14 +223,12 @@
     "Version": "버전",
     "DataFolder": "데이터 폴더",
     "PrivacyNote": "모든 데이터는 이 PC의 데이터 폴더에만 저장되고, 인터넷으로 보내지 않습니다. 대시보드는 이 PC에서만 열립니다.",
-
     "Err_no_columns": "가져올 값 열을 하나 이상 골라 주세요.",
     "Err_too_many_rows": "시간순이 거꾸로인 파일은 500만 줄까지 가져올 수 있습니다.",
     "Err_not_a_time_column": "그 열은 시간으로 읽을 수 없습니다.",
     "Err_empty_file": "빈 파일입니다.",
     "Err_lo_above_hi": "하한이 상한보다 큽니다.",
     "Err_bad_retention": "보관 일수는 1에서 3650 사이로 정해 주세요.",
-
     "CsvStart": "시작",
     "CsvEnd": "끝",
     "CsvChannel": "채널",
@@ -251,7 +237,35 @@
     "CsvExpected": "평소 값",
     "CsvScore": "정도(평소 대비 배수)",
     "CsvAck": "괜찮음 표시",
-    "CsvUnit": "단위"
+    "CsvUnit": "단위",
+    "NavPatterns": "패턴",
+    "PatternsTitle": "패턴",
+    "PatternsLead": "특이사항이 어떤 상황에서 평소보다 자주 일어나는지, 어떤 일이 특이사항 앞에 오는지입니다. 함께 일어난다는 뜻이지, 한쪽이 원인이라는 뜻은 아닙니다.",
+    "Analyze": "다시 분석",
+    "Analyzing": "분석하는 중...",
+    "AnalyzeFailed": "분석하지 못했습니다: {0}",
+    "AnalyzedAt": "{0} 분석 · {2} 칸 {1}개 · 검정 {3}번",
+    "NoPatterns": "이 기간에는 우연으로 보기 어려운 패턴이 없습니다.",
+    "FewEvents": "패턴을 찾으려면 한 채널에 같은 종류의 특이사항이 5건 이상 있어야 합니다. 데이터가 더 쌓이면 다시 분석해 보세요.",
+    "Situations": "이럴 때 자주 일어납니다",
+    "RuleWhen": "{0}일 때",
+    "TimesUsual": "평소의 {0}배",
+    "RuleEvidence": "그 상황은 전체 시간의 {0} · 그때 일어난 것 {1}건 / 전체 {2}건 ({3})",
+    "EventCount": "{0}건",
+    "Sequences": "앞에 오는 일",
+    "SequenceText": "{0} 뒤 {1} 안에 {2}",
+    "SequenceEvidence": "{0}건 / 전체 {1}건 · 우연이라면 약 {2}건",
+    "WhenTitle": "요일·시간대별 특이사항",
+    "PatternsMethod": "기간을 5분 이상의 칸으로 나눠, 상황(시간대, 요일, 다른 채널의 높음·낮음, 켜짐·꺼짐 같은 값)마다 특이사항이 시작된 칸의 비율을 평소와 비교합니다. Fisher 정확검정을 하고 여러 번 검정한 만큼 보정(Benjamini–Hochberg, 5%)한 뒤, 평소의 2배 이상이고 3건 이상인 것만 보여 줍니다. 높음·낮음은 그 채널 값의 위·아래 20%입니다. 평일·주말과 요일은 2주 이상일 때만 봅니다.",
+    "CondHour": "{0}–{1}시",
+    "CondWeekend": "주말",
+    "CondWeekday": "평일",
+    "CondHigh": "{0} 높음(≥ {1})",
+    "CondLow": "{0} 낮음(≤ {1})",
+    "CondValue": "{0} = {1}",
+    "SwitchTo": "{0} → {1}",
+    "Fewer": "적음",
+    "More": "많음"
   },
   "en": {
     "Starting": "Starting...",
@@ -261,7 +275,6 @@
     "Hint": "HOODATA collects data while this window is open. It keeps collecting when minimised and stops when closed.",
     "ConfirmClose": "Closing HOODATA stops collecting data. Close it?",
     "Fatal": "HOODATA could not start.\n\n{0}",
-
     "PcSource": "This PC",
     "Pc_cpu": "CPU usage",
     "Pc_memory": "Memory in use",
@@ -270,7 +283,6 @@
     "Pc_net_out": "Network out",
     "Pc_battery": "Battery",
     "Pc_plugged": "Plugged in",
-
     "Kind_gap": "Gap",
     "Kind_spike": "Spike",
     "Kind_step": "Level change",
@@ -285,13 +297,11 @@
     "KindHelp_range": "The value left the lower or upper limit set for the channel.",
     "KindHelp_noisy": "The jitter (noise) of the values grew several times its usual level. Electrical noise, vibration or an ageing sensor.",
     "KindHelp_unusual": "For more than 15 minutes the value stayed outside its usual range for that time of day (over the last days). Needs a few days of data.",
-
     "Status_ok": "Normal",
     "Status_warn": "Warning",
     "Status_alert": "Alert",
     "Status_learning": "Learning",
     "Status_idle": "Imported",
-
     "Why_gap": "No values for {0} · usual interval {1}",
     "Why_spike": "Spiked to {0} · usual {1} · {2} times the usual jitter",
     "Why_spikeN": "Largest spike {0} · usual {1} · {2} times the usual jitter · {3} spikes",
@@ -300,7 +310,6 @@
     "Why_range": "Limits {0} to {1} · value {2}",
     "Why_noisy": "Noise {0} times its usual level",
     "Why_unusual": "Usual range at {0}:00 is {1} to {2} · value {3}",
-
     "DurS": "{0} s",
     "DurM": "{0} min",
     "DurH": "{0} h",
@@ -310,7 +319,6 @@
     "AgoM": "{0} min ago",
     "AgoH": "{0} h ago",
     "AgoD": "{0} d ago",
-
     "NavOverview": "Dashboard",
     "NavEvents": "Anomalies",
     "NavStats": "Statistics",
@@ -320,7 +328,6 @@
     "Disconnected": "Disconnected: check that the HOODATA window is open",
     "LockedTitle": "Open this from the HOODATA window",
     "LockedText": "Only the person who started HOODATA on this PC can see this dashboard. Click 'Open dashboard' in the HOODATA window.",
-
     "Range_1h": "1 hour",
     "Range_6h": "6 hours",
     "Range_24h": "24 hours",
@@ -328,7 +335,6 @@
     "Range_30d": "30 days",
     "Range_all": "All",
     "Period": "Period",
-
     "OverviewTitle": "Dashboard",
     "OverviewLead": "The current value and the last hour of every channel. Click a channel for details.",
     "EmptyText": "No data yet. Import a CSV file or add a data source.",
@@ -373,7 +379,6 @@
     "Save": "Save",
     "Saved": "Saved.",
     "LimitHelp": "With a lower or upper limit set, values outside it are recorded as 'Out of range'. Leave empty for none.",
-
     "EventsTitle": "Anomalies",
     "EventsLead": "The anomalies HOODATA found. Each line says why.",
     "Channel": "Channel",
@@ -391,7 +396,6 @@
     "Newer": "Newer",
     "Older": "Older",
     "ShowingOf": "{0}–{1} of {2}",
-
     "StatsTitle": "Statistics",
     "StatsLead": "Statistics of every channel for the chosen period.",
     "StatsHelp": "Statistics are computed from the one-minute summaries. Noise is the mean of the per-minute noise estimates; time without data is the total length of the 'Gap' anomalies.",
@@ -405,7 +409,6 @@
     "StatEvents": "Anomalies",
     "StatFirst": "First",
     "StatLast": "Last",
-
     "SourcesTitle": "Data sources",
     "SourcesLead": "Where HOODATA gets its data: the sources it collects from and the files it imported.",
     "AddSource": "Add",
@@ -471,7 +474,6 @@
     "ImportUnsorted": "{0} rows out of time order were stored only",
     "ImportFailed": "Import failed: {0}",
     "SeeDashboard": "See the dashboard",
-
     "SettingsTitle": "Settings",
     "Sensitivity": "Anomaly sensitivity",
     "Sens_low": "Low",
@@ -489,14 +491,12 @@
     "Version": "Version",
     "DataFolder": "Data folder",
     "PrivacyNote": "All data stays in the data folder on this PC and is never sent over the internet. The dashboard opens only on this PC.",
-
     "Err_no_columns": "Choose at least one value column.",
     "Err_too_many_rows": "Files in reverse time order can have up to 5 million rows.",
     "Err_not_a_time_column": "That column cannot be read as time.",
     "Err_empty_file": "The file is empty.",
     "Err_lo_above_hi": "The lower limit is above the upper limit.",
     "Err_bad_retention": "Days to keep must be between 1 and 3650.",
-
     "CsvStart": "Start",
     "CsvEnd": "End",
     "CsvChannel": "Channel",
@@ -505,6 +505,34 @@
     "CsvExpected": "Usual value",
     "CsvScore": "Degree (times the usual)",
     "CsvAck": "Marked fine",
-    "CsvUnit": "Unit"
+    "CsvUnit": "Unit",
+    "NavPatterns": "Patterns",
+    "PatternsTitle": "Patterns",
+    "PatternsLead": "In which situations anomalies happen more often than usual, and what tends to come before them. Happening together does not mean that one causes the other.",
+    "Analyze": "Analyse again",
+    "Analyzing": "Analysing...",
+    "AnalyzeFailed": "The analysis failed: {0}",
+    "AnalyzedAt": "Analysed {0} · {1} slots of {2} · {3} tests",
+    "NoPatterns": "In this period there is no pattern that is unlikely to be chance.",
+    "FewEvents": "Patterns need at least 5 anomalies of one kind on a channel. Analyse again when more data has come in.",
+    "Situations": "When they happen more often",
+    "RuleWhen": "When: {0}",
+    "TimesUsual": "{0} times as often",
+    "RuleEvidence": "That situation is {0} of the time · {1} of {2} anomalies happened in it ({3})",
+    "EventCount": "{0} anomalies",
+    "Sequences": "What comes before",
+    "SequenceText": "{0}, then within {1}: {2}",
+    "SequenceEvidence": "{0} of {1} · about {2} by chance",
+    "WhenTitle": "Anomalies by weekday and hour",
+    "PatternsMethod": "The period is cut into slots of 5 minutes or more. For each situation (time of day, weekday, another channel high or low, a value such as on or off) the share of slots in which an anomaly started is compared with the usual share. Only results that pass Fisher's exact test after correcting for the number of tests (Benjamini–Hochberg, 5%), happen at least twice as often and at least 3 times are shown. High and low are the top and bottom 20% of the channel's values. Weekdays are used from two weeks of data on.",
+    "CondHour": "{0}:00–{1}:00",
+    "CondWeekend": "weekend",
+    "CondWeekday": "weekday",
+    "CondHigh": "{0} high (≥ {1})",
+    "CondLow": "{0} low (≤ {1})",
+    "CondValue": "{0} = {1}",
+    "SwitchTo": "{0} → {1}",
+    "Fewer": "Fewer",
+    "More": "More"
   }
 }

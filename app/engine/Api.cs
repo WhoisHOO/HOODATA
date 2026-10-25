@@ -113,6 +113,10 @@ namespace Hoodata
                     if (p.Length == 2 && m == "DELETE") return CancelImport(p[1]);
                     break;
                 case "jobs": return Jobs();
+                case "patterns":
+                    if (p.Length == 1 && m == "GET") return Patterns();
+                    if (p.Length == 2 && p[1] == "run" && m == "POST") return RunPatterns(req.BodyJson());
+                    break;
                 case "settings":
                     if (m == "POST") return Settings(req.BodyJson());
                     break;
@@ -611,6 +615,35 @@ namespace Hoodata
             var w = new JsonWriter();
             WriteJobs(w);
             return HttpResponse.Json(w);
+        }
+
+        // ---- patterns ----
+
+        HttpResponse Patterns()
+        {
+            string json = e.Store.GetMeta("patterns");
+            var w = new JsonWriter().Obj().Prop("running", e.PatternsRunning).Key("error").Str(e.PatternsError).Key("result").Raw(json);
+            return HttpResponse.Json(w.EndObj());
+        }
+
+        HttpResponse RunPatterns(Dictionary<string, object> body)
+        {
+            long to = (long)Json.Num(body, "to", Clock.Now());
+            long from = (long)Json.Num(body, "from", to - 30L * 86400000);
+            // Cut the period to where there is data, so "all" does not start in 1970.
+            using (var rd = e.Store.Read())
+            using (var st = rd.Db.Prepare("SELECT min(t), max(t) FROM minute"))
+            {
+                st.Step();
+                if (!st.IsNull(0))
+                {
+                    from = Math.Max(from, st.GetLong(0));
+                    to = Math.Min(to, st.GetLong(1) + 60000);
+                }
+            }
+            if (to <= from) return HttpResponse.Error(400, "bad_range");
+            bool started = e.StartPatterns(from, to);
+            return HttpResponse.Json(new JsonWriter().Obj().Prop("started", started).EndObj());
         }
 
         // ---- settings ----
